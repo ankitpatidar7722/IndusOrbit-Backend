@@ -1,0 +1,26 @@
+# ── .NET build output ─────────────────────────────
+bin/
+obj/
+[Bb]in/
+[Oo]bj/
+*.dll
+*.pdb
+
+# ── IDE / editor ──────────────────────────────────
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+
+# ── Runtime data (user uploads should NOT be in source control) ──
+user-uploads/
+Uploads/
+wwwroot/uploads/
+
+# ── Local secrets (uncomment the next line to keep DB passwords OUT of the repo) ──
+# appsettings.Development.json
+
+# ── OS ────────────────────────────────────────────
+Thumbs.db
+.DS_Store
