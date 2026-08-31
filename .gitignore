@@ -3,6 +3,8 @@ bin/
 obj/
 [Bb]in/
 [Oo]bj/
+publish/
+[Pp]ublish/
 *.dll
 *.pdb
 
