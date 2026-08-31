@@ -9,6 +9,8 @@ public sealed class Db
     private readonly string? _control;
     private readonly string? _tms;
     private readonly string? _appDb;
+    private readonly string? _keyline;
+    private readonly string _mode;
 
     public Db(IConfiguration cfg)
     {
@@ -19,6 +21,7 @@ public sealed class Db
         // Can also be overridden at runtime with a DatabaseMode env var.
         var mode = cfg["DatabaseMode"]?.Trim();
         if (string.IsNullOrWhiteSpace(mode)) mode = "Local";
+        _mode = mode;
 
         string? Conn(string name) =>
             cfg[$"ConnectionStrings:{mode}:{name}"] ?? cfg.GetConnectionString(name);
@@ -31,7 +34,23 @@ public sealed class Db
         _tms = Conn("IndusTaskManagement");
         // The IndusAppDB HR database (Employees) — used for employee login.
         _appDb = Conn("IndusApp");
+        // The IndusEnterpriseKeyline lookup DB (Change-Request module/sub-module dropdowns).
+        _keyline = Conn("IndusKeyline");
     }
+
+    /// <summary>The active DatabaseMode ("Local" or "Server").</summary>
+    public string Mode => _mode;
+
+    /// <summary>Resolved connection strings by logical name — for the /api/health/db diagnostic.</summary>
+    public IReadOnlyList<(string Name, string? ConnectionString)> ConfiguredConnections =>
+        new (string Name, string? ConnectionString)[]
+        {
+            ("Default", _default),
+            ("IndusControl", _control),
+            ("IndusTaskManagement", _tms),
+            ("IndusApp", _appDb),
+            ("IndusKeyline", _keyline),
+        };
 
     /// <summary>Open a connection to the Indus360App application database.</summary>
     public async Task<SqlConnection> OpenAsync()

@@ -192,7 +192,15 @@ public sealed class UserAdminRepository
         return (await c.QueryAsync<ModuleAuthRow>(@"
             SELECT m.ModuleID, m.ModuleName, m.ModuleDisplayName, m.ModuleHeadName, m.ModuleHeadDisplayName,
                    m.SetGroupIndex, m.ModuleDisplayOrder,
-                   CAST(ISNULL(a.CanView,0)   AS bit) AS CanView,
+                   -- Client-Detail-Tab modules default to view-all when the user has NO clienttab rows yet
+                   -- (matches the effective-permission default) so the matrix honestly shows the current state
+                   -- and an admin doesn't accidentally deny them by saving an unrelated change.
+                   CAST(CASE WHEN m.ModuleHeadName = 'Client Detail Tabs'
+                              AND NOT EXISTS (SELECT 1 FROM app.UserModuleAuthentication x
+                                              JOIN app.ModuleMaster xm ON xm.ModuleID = x.ModuleID
+                                              WHERE x.UserID = @userId AND ISNULL(x.IsDeletedTransaction,0)=0
+                                                AND xm.ModuleHeadName = 'Client Detail Tabs')
+                             THEN 1 ELSE ISNULL(a.CanView,0) END AS bit) AS CanView,
                    CAST(ISNULL(a.CanSave,0)   AS bit) AS CanSave,
                    CAST(ISNULL(a.CanEdit,0)   AS bit) AS CanEdit,
                    CAST(ISNULL(a.CanDelete,0) AS bit) AS CanDelete,
@@ -212,12 +220,21 @@ public sealed class UserAdminRepository
         await using var c = await _db.OpenAsync();
         var companyId = await c.ExecuteScalarAsync<int?>("SELECT TOP 1 CompanyId FROM app.Users WHERE UserId=@id", new { id = req.UserId }) ?? 1;
         await using var tx = (SqlTransaction)await c.BeginTransactionAsync();
+        // Client-Detail-Tab modules must ALWAYS be persisted (even all-zero) so an explicit
+        // "unchecked = deny" is recorded. Otherwise a fully-unchecked clienttab row is skipped,
+        // leaving the user with NO clienttab rows — indistinguishable from "never configured",
+        // which the effective-permission rule treats as view-all, so the tabs can never be hidden.
+        var clientTabIds = (await c.QueryAsync<long>(
+            "SELECT ModuleID FROM app.ModuleMaster WHERE ModuleHeadName='Client Detail Tabs' AND ISNULL(IsDeletedTransaction,0)=0",
+            transaction: tx)).ToHashSet();
         await c.ExecuteAsync("DELETE FROM app.UserModuleAuthentication WHERE UserID=@id", new { id = req.UserId }, tx);
         var saved = 0;
         foreach (var m in req.Modules)
         {
-            // keep a row only if at least one permission is granted
-            if (!(m.CanView || m.CanSave || m.CanEdit || m.CanDelete || m.CanPrint || m.CanExport || m.CanCancel)) continue;
+            // keep a row only if at least one permission is granted — EXCEPT client-detail tabs,
+            // which are always kept so an explicit deny (all unchecked) is recorded, not lost.
+            if (!(m.CanView || m.CanSave || m.CanEdit || m.CanDelete || m.CanPrint || m.CanExport || m.CanCancel)
+                && !clientTabIds.Contains(m.ModuleID)) continue;
             await c.ExecuteAsync(@"
                 INSERT INTO app.UserModuleAuthentication
                   (UserID, ModuleID, CanView, CanSave, CanEdit, CanDelete, CanPrint, CanExport, CanCancel, CompanyID, IsDeletedTransaction)

@@ -7,8 +7,9 @@ namespace Indus360.Api.Repositories;
 /// <summary>
 /// Per-user permission for the 7 client-detail tabs (registered as non-sidebar modules
 /// under ModuleHeadName='Client Detail Tabs' in app.ModuleMaster; managed via the normal
-/// User Management → Module Authentication matrix). Effective permission rules:
-///   • Admin role            → full (view + edit) on every tab.
+/// User Management → Module Authentication matrix). Effective permission rules — the matrix is
+/// authoritative for EVERYONE (same as sidebar modules; no admin bypass, so unchecking a tab
+/// actually hides it even for admins):
 ///   • No tab rows at all     → DEFAULT: view every tab, edit none.
 ///   • Any tab row configured → EXPLICIT: only View-granted tabs are visible; Edit follows CanEdit.
 /// </summary>
@@ -29,10 +30,6 @@ public sealed class ClientTabPermissionRepository
     {
         await using var c = await _db.OpenAsync();
 
-        var role = (await c.ExecuteScalarAsync<string?>("SELECT Role FROM app.Users WHERE UserId=@userId", new { userId }))?.Trim() ?? "";
-        var isAdmin = role.Equals("admin", StringComparison.OrdinalIgnoreCase)
-                   || role.Equals("administrator", StringComparison.OrdinalIgnoreCase);
-
         var rows = (await c.QueryAsync<Row>(@"
             SELECT m.ModuleName,
                    CAST(ISNULL(a.CanView,0) AS bit) AS CanView,
@@ -51,8 +48,7 @@ public sealed class ClientTabPermissionRepository
             var key = r.ModuleName.StartsWith("clienttab-", StringComparison.OrdinalIgnoreCase)
                 ? r.ModuleName.Substring("clienttab-".Length) : r.ModuleName;
             bool canView, canEdit;
-            if (isAdmin) { canView = true; canEdit = true; }
-            else if (!anyConfigured) { canView = true; canEdit = false; }   // default
+            if (!anyConfigured) { canView = true; canEdit = false; }        // default: view all, edit none (unconfigured)
             else { canEdit = r.CanEdit; canView = r.CanView || r.CanEdit; } // explicit; edit implies view
             return new ClientTabPermissionDto { Key = key, CanView = canView, CanEdit = canEdit };
         }).ToList();

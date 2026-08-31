@@ -24,6 +24,11 @@ public sealed class OtherMasterController : ControllerBase
     [HttpPost("createdynamicmenuwithsubmenu")]
     public async Task<IActionResult> CreateDynamicMenuWithSubMenu()
     {
+        // Never cache the per-user menu — so granting/removing a module's authority is reflected
+        // on the very next page load (hard refresh), never served stale from a browser/proxy cache.
+        Response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate";
+        Response.Headers["Pragma"] = "no-cache";
+
         long userId = 0;
         if (Request.Headers.TryGetValue("UserID", out var uidHeader))
             long.TryParse(uidHeader.ToString(), out userId);

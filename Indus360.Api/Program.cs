@@ -59,7 +59,10 @@ builder.Services.AddCors(o => o.AddPolicy("frontend", p => p
     .WithOrigins(origins)
     .AllowAnyHeader()
     .AllowAnyMethod()
-    .AllowCredentials()));
+    .AllowCredentials()
+    // Cache the CORS preflight (OPTIONS) result in the browser for 2h (Chrome's max) so it
+    // doesn't re-preflight before every credentialed cross-origin call — halves API round-trips.
+    .SetPreflightMaxAge(TimeSpan.FromHours(2))));
 
 var app = builder.Build();
 
