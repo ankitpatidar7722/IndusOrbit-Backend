@@ -56,6 +56,7 @@ public sealed class UserSaveRequest
     public string FullName { get; set; } = "";
     public string Email { get; set; } = "";
     public string? Password { get; set; }          // create: required; edit: blank = keep current
+    public string? Mobile { get; set; }
     public string? Role { get; set; }
     public int? ReportingManagerId { get; set; }
     public bool IsActive { get; set; } = true;

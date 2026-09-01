@@ -40,6 +40,8 @@ builder.Services.AddScoped<AttachmentRepository>();
 // Client Kick-Off / Sign-Off finalized documents (save / view / download)
 builder.Services.AddScoped<ClientDocumentRepository>();
 builder.Services.AddScoped<KeylineRepository>();
+// CRM client picker (reads IndusAppDB.dbo.Customers — the internal CRM app's data, same DB)
+builder.Services.AddScoped<CrmRepository>();
 // Email (compose/send/history) — migrated from the legacy Indas Estimo email feature
 builder.Services.AddScoped<Indus360.Api.Repositories.EmailRepository>();
 builder.Services.AddScoped<Indus360.Api.Repositories.EmailTemplateRepository>();

@@ -80,13 +80,13 @@ public sealed class UserAdminRepository
             SELECT TOP 1 @cu=CompanyUsername, @cp=CompanyPassword, @pu=ProductionUnitId, @fy=FYear
               FROM app.Users WHERE CompanyId=@CompanyId AND IsActive=1 AND ISNULL(IsDeletedTransaction,0)=0 AND NULLIF(CompanyUsername,'') IS NOT NULL ORDER BY UserId;
             INSERT INTO app.Users
-              (FullName, Email, PasswordHash, Role, ReportingManagerId, IsActive, CreatedAt, CompanyId, ProductionUnitId, FYear, CompanyUsername, CompanyPassword,
+              (FullName, Email, PasswordHash, Role, Mobile, ReportingManagerId, IsActive, CreatedAt, CompanyId, ProductionUnitId, FYear, CompanyUsername, CompanyPassword,
                EmailProvider, SmtpUsername, SmtpPassword, SmtpServer, SmtpPort, SmtpAuthenticate, SmtpUseSSL, EmailSignature, CreatedBy, CreatedDate)
             VALUES
-              (@FullName, @Email, @Password, @Role, @ReportingManagerId, @IsActive, SYSDATETIME(), @CompanyId, ISNULL(@pu,0), ISNULL(@fy,'2026-2027'), ISNULL(@cu,''), ISNULL(@cp,''),
+              (@FullName, @Email, @Password, @Role, @Mobile, @ReportingManagerId, @IsActive, SYSDATETIME(), @CompanyId, ISNULL(@pu,0), ISNULL(@fy,'2026-2027'), ISNULL(@cu,''), ISNULL(@cp,''),
                @EmailProvider, @SmtpUsername, @SmtpPassword, @SmtpServer, @SmtpPort, @SmtpAuthenticate, @SmtpUseSSL, @EmailSignature, @CreatedBy, SYSDATETIME());
             SELECT CAST(SCOPE_IDENTITY() AS bigint);",
-            new { r.FullName, r.Email, Password = r.Password ?? "", r.Role, r.ReportingManagerId, r.IsActive, r.CompanyId,
+            new { r.FullName, r.Email, Password = r.Password ?? "", r.Role, r.Mobile, r.ReportingManagerId, r.IsActive, r.CompanyId,
                   r.EmailProvider, r.SmtpUsername, r.SmtpPassword, r.SmtpServer, r.SmtpPort, r.SmtpAuthenticate, r.SmtpUseSSL, r.EmailSignature, CreatedBy = actingUserId });
         await SyncTmsUserAsync(c, newId);   // mirror into the TMS dbo.Users (Point Management identity)
         return newId;
@@ -125,7 +125,7 @@ public sealed class UserAdminRepository
         using var c = await _db.OpenAsync();
         await c.ExecuteAsync($@"
             UPDATE app.Users SET
-                FullName=@FullName, Email=@Email, Role=ISNULL(NULLIF(@Role,''), Role),
+                FullName=@FullName, Email=@Email, Role=ISNULL(NULLIF(@Role,''), Role), Mobile=@Mobile,
                 ReportingManagerId=@ReportingManagerId, IsActive=@IsActive,
                 EmailProvider=@EmailProvider, SmtpUsername=@SmtpUsername, SmtpServer=@SmtpServer,
                 SmtpPort=@SmtpPort, SmtpAuthenticate=@SmtpAuthenticate, SmtpUseSSL=@SmtpUseSSL, EmailSignature=@EmailSignature,
@@ -133,7 +133,7 @@ public sealed class UserAdminRepository
                 {(setPwd ? ", PasswordHash=@Password" : "")}
                 {(setSmtpPwd ? ", SmtpPassword=@SmtpPassword" : "")}
             WHERE UserId=@UserId",
-            new { r.UserId, r.FullName, r.Email, r.Role, r.ReportingManagerId, r.IsActive, r.Password,
+            new { r.UserId, r.FullName, r.Email, r.Role, r.Mobile, r.ReportingManagerId, r.IsActive, r.Password,
                   r.EmailProvider, r.SmtpUsername, r.SmtpPassword, r.SmtpServer, r.SmtpPort, r.SmtpAuthenticate, r.SmtpUseSSL, r.EmailSignature, ModifiedBy = actingUserId });
         await SyncTmsUserAsync(c, r.UserId);   // keep the TMS dbo.Users in sync
     }

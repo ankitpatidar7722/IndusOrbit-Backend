@@ -19,10 +19,16 @@ public sealed class ModulesRepository
     private readonly string _localCs;
     public ModulesRepository(IConfiguration cfg)
     {
+        // IndusControl is a flat, mode-independent connection string.
         _controlCs = cfg.GetConnectionString("IndusControl")
            ?? throw new InvalidOperationException("ConnectionStrings:IndusControl not configured.");
-        _localCs = cfg.GetConnectionString("Default")
-           ?? throw new InvalidOperationException("ConnectionStrings:Default not configured.");
+        // "Default" is resolved mode-aware (same as Db.cs): the app DB connection strings live under
+        // ConnectionStrings:{Local|Server}:Default, NOT a flat ConnectionStrings:Default. DatabaseMode
+        // (default "Local") picks the section; fall back to a flat Default for older configs.
+        var mode = cfg["DatabaseMode"]?.Trim();
+        if (string.IsNullOrWhiteSpace(mode)) mode = "Local";
+        _localCs = cfg[$"ConnectionStrings:{mode}:Default"] ?? cfg.GetConnectionString("Default")
+           ?? throw new InvalidOperationException($"ConnectionStrings:{mode}:Default (or ConnectionStrings:Default) not configured.");
     }
 
     private SqlConnection Control() => new(_controlCs);
