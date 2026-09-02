@@ -14,7 +14,8 @@ public class CreateClientRequest : Client
 public class ClientsController : ControllerBase
 {
     private readonly ClientRepository _repo;
-    public ClientsController(ClientRepository repo) => _repo = repo;
+    private readonly SubscriptionRepository _subs;
+    public ClientsController(ClientRepository repo, SubscriptionRepository subs) { _repo = repo; _subs = subs; }
 
     [HttpGet]
     public async Task<IActionResult> GetAll() => Ok(await _repo.GetAllAsync());
@@ -46,6 +47,29 @@ public class ClientsController : ControllerBase
     [HttpPost("{code}/milestones")]
     public async Task<IActionResult> AddMilestone(string code, [FromBody] Milestone m)
     { m.ClientCode = code; m.CreatedBy = this.CurrentUserId(); m.Id = await _repo.AddMilestoneAsync(m); return Ok(m); }
+
+    /// <summary>Backfill the fixed "Roadmap to Success" milestone template into EVERY client that
+    /// has no milestones yet (idempotent — clients that already have milestones are skipped). New
+    /// clients get the template lazily on their first tracker view.</summary>
+    [HttpPost("seed-milestone-template")]
+    public async Task<IActionResult> SeedMilestoneTemplateAll()
+    {
+        var subs = await _subs.GetAllAsync();
+        var (clients, seeded, failed) = await _repo.SeedMilestonesForAllAsync(subs.Select(s => s.CompanyUniqueCode), this.CurrentUserId());
+        return Ok(new { success = true, clients, seeded, failed });
+    }
+
+    public sealed class InitRoadmapRequest { public string? SalesPerson { get; set; } }
+
+    /// <summary>Called by the provisioning wizard right after a client's DB is created: stamps the
+    /// Order Date phase with today's date + the CRM sales person + Complete/On-Time, and cascades every
+    /// later phase's Estimated Start from its Task Timeline (skipping Sundays).</summary>
+    [HttpPost("{code}/milestones/init-roadmap")]
+    public async Task<IActionResult> InitRoadmap(string code, [FromBody] InitRoadmapRequest? body)
+    {
+        await _repo.InitRoadmapAsync(code, body?.SalesPerson, this.CurrentUserId());
+        return Ok(new { success = true });
+    }
 
     [HttpPut("{code}/milestones/{id:int}")]
     public async Task<IActionResult> UpdateMilestone(string code, int id, [FromBody] Milestone m)
@@ -91,6 +115,21 @@ public class ClientsController : ControllerBase
 
     [HttpDelete("{code}/changerequests/{id:int}")]
     public async Task<IActionResult> DeleteCr(int id) => await _repo.DeleteChangeRequestAsync(id, this.CurrentUserId()) ? NoContent() : NotFound();
+
+    public sealed class ToWorklogRequest { public string? ClientName { get; set; } }
+
+    /// <summary>"Send To → Task": append a Tracker row (entity = milestone | training | changerequest)
+    /// to the acting user's TODAY Daily Worklog DRAFT in the internal CRM app (matched by email).</summary>
+    [HttpPost("{code}/tracker/{entity}/{id:int}/to-worklog")]
+    public async Task<IActionResult> TrackerRowToWorklog(string code, string entity, int id, [FromBody] ToWorklogRequest? body)
+    {
+        try
+        {
+            var (ok, message) = await _repo.SendTrackerRowToWorklogAsync(code, entity, id, body?.ClientName, this.CurrentUserId());
+            return Ok(new { success = ok, message });
+        }
+        catch (Exception ex) { return Ok(new { success = false, message = ex.Message }); }
+    }
 
     // -------- Support --------
     [HttpPost("{code}/support")]

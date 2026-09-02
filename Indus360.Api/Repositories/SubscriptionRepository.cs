@@ -16,6 +16,16 @@ public sealed class SubscriptionRepository
 
     private const string Table = "dbo.Indus_Company_Authentication_For_Web_Modules";
 
+    /// <summary>Distinct non-empty ApplicationBaseURL values — for the Application URL dropdown.</summary>
+    public async Task<IEnumerable<string>> GetAppBaseUrlsAsync()
+    {
+        using var c = await _db.OpenControlAsync();
+        return await c.QueryAsync<string>($@"
+            SELECT DISTINCT ApplicationBaseURL FROM {Table}
+            WHERE NULLIF(LTRIM(RTRIM(ApplicationBaseURL)),'') IS NOT NULL
+            ORDER BY ApplicationBaseURL");
+    }
+
     public async Task<IEnumerable<SubscriptionCard>> GetAllAsync()
     {
         using var c = await _db.OpenControlAsync();
@@ -44,9 +54,10 @@ public sealed class SubscriptionRepository
             SELECT CompanyUserID, Password, Conn_String, CompanyName, ApplicationName, ApplicationVersion,
                    DataBaseLocation, LastLoginDateTime, IsActive, Country, State, City, ApplicationBaseURL,
                    CompanyCode, CompanyUniqueCode, MaxCompanyUniqueCode, FromDate, ToDate, FYear, PaymentDueDate,
-                   SubscriptionStatus, StatusDescription, SubscriptionStatusMessage, LoginAllowed, GSTIN,
+                   SubscriptionStatus, StatusDescription, SubscriptionStatusMessage, LoginAllowed, UserLimit, GSTIN,
                    LatestVersion, Email, Mobile, Address, IsMessageActive, MessageDurationValue, MessageDurationType,
-                   CloudSubscriptionStatus, CloudFromDate, CloudToDate, CloudPaymentDueDate
+                   CloudSubscriptionStatus, CloudFromDate, CloudToDate, CloudPaymentDueDate,
+                   ERPSubscriptionPeriod, CloudSubscriptionPeriod
             FROM {Table}
             WHERE CompanyUserID = @companyUserId",
             new { companyUserId });
@@ -82,15 +93,17 @@ public sealed class SubscriptionRepository
             INSERT INTO {Table}
               (CompanyUserID, Password, Conn_String, CompanyName, ApplicationName, ApplicationVersion,
                Country, State, City, CompanyCode, CompanyUniqueCode, MaxCompanyUniqueCode, FromDate, ToDate, FYear,
-               PaymentDueDate, SubscriptionStatus, StatusDescription, SubscriptionStatusMessage, LoginAllowed, GSTIN,
-               Email, Mobile, Address, IsActive, IsMessageActive, MessageDurationValue, MessageDurationType,
-               CloudSubscriptionStatus, CloudFromDate, CloudToDate, CloudPaymentDueDate)
+               PaymentDueDate, SubscriptionStatus, StatusDescription, SubscriptionStatusMessage, LoginAllowed, UserLimit, GSTIN,
+               Email, Mobile, Address, ApplicationBaseURL, IsActive, IsMessageActive, MessageDurationValue, MessageDurationType,
+               CloudSubscriptionStatus, CloudFromDate, CloudToDate, CloudPaymentDueDate,
+               ERPSubscriptionPeriod, CloudSubscriptionPeriod)
             VALUES
               (@CompanyUserID, @Password, @Conn_String, @CompanyName, @ApplicationName, @ApplicationVersion,
                @Country, @State, @City, @CompanyCode, @CompanyUniqueCode, @MaxCompanyUniqueCode, @FromDate, @ToDate, @FYear,
-               @PaymentDueDate, @SubscriptionStatus, @StatusDescription, @SubscriptionStatusMessage, @LoginAllowed, @Gstin,
-               @Email, @Mobile, @Address, 1, @IsMessageActive, @MessageDurationValue, @MessageDurationType,
-               @CloudSubscriptionStatus, @CloudFromDate, @CloudToDate, @CloudPaymentDueDate)", r);
+               @PaymentDueDate, @SubscriptionStatus, @StatusDescription, @SubscriptionStatusMessage, @LoginAllowed, @UserLimit, @Gstin,
+               @Email, @Mobile, @Address, @ApplicationBaseURL, 1, @IsMessageActive, @MessageDurationValue, @MessageDurationType,
+               @CloudSubscriptionStatus, @CloudFromDate, @CloudToDate, @CloudPaymentDueDate,
+               @ErpSubscriptionPeriod, @CloudSubscriptionPeriod)", r);
     }
 
     public async Task<int> UpdateAsync(SubscriptionSaveRequest r)
@@ -104,17 +117,19 @@ public sealed class SubscriptionRepository
               City=@City, CompanyCode=@CompanyCode, CompanyUniqueCode=@CompanyUniqueCode, FromDate=@FromDate, ToDate=@ToDate,
               FYear=@FYear, PaymentDueDate=@PaymentDueDate, SubscriptionStatus=@SubscriptionStatus,
               StatusDescription=@StatusDescription, SubscriptionStatusMessage=@SubscriptionStatusMessage,
-              LoginAllowed=@LoginAllowed, GSTIN=@Gstin, Email=@Email, Mobile=@Mobile, Address=@Address,
+              LoginAllowed=@LoginAllowed, UserLimit=@UserLimit, GSTIN=@Gstin, Email=@Email, Mobile=@Mobile, Address=@Address, ApplicationBaseURL=@ApplicationBaseURL,
               IsMessageActive=@IsMessageActive, MessageDurationValue=@MessageDurationValue, MessageDurationType=@MessageDurationType,
-              CloudSubscriptionStatus=@CloudSubscriptionStatus, CloudFromDate=@CloudFromDate, CloudToDate=@CloudToDate, CloudPaymentDueDate=@CloudPaymentDueDate
+              CloudSubscriptionStatus=@CloudSubscriptionStatus, CloudFromDate=@CloudFromDate, CloudToDate=@CloudToDate, CloudPaymentDueDate=@CloudPaymentDueDate,
+              ERPSubscriptionPeriod=@ErpSubscriptionPeriod, CloudSubscriptionPeriod=@CloudSubscriptionPeriod
             WHERE CompanyUserID=@Key",
             new
             {
                 r.CompanyUserID, r.Password, r.Conn_String, r.CompanyName, r.ApplicationName, r.ApplicationVersion,
                 r.Country, r.State, r.City, r.CompanyCode, r.CompanyUniqueCode, r.FromDate, r.ToDate, r.FYear,
                 r.PaymentDueDate, r.SubscriptionStatus, r.StatusDescription, r.SubscriptionStatusMessage,
-                r.LoginAllowed, r.Gstin, r.Email, r.Mobile, r.Address, r.IsMessageActive, r.MessageDurationValue,
+                r.LoginAllowed, r.UserLimit, r.Gstin, r.Email, r.Mobile, r.Address, r.ApplicationBaseURL, r.IsMessageActive, r.MessageDurationValue,
                 r.MessageDurationType, r.CloudSubscriptionStatus, r.CloudFromDate, r.CloudToDate, r.CloudPaymentDueDate,
+                r.ErpSubscriptionPeriod, r.CloudSubscriptionPeriod,
                 Key = key,
             });
     }

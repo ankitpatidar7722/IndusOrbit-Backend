@@ -11,7 +11,8 @@ namespace Indus360.Api.Repositories;
 /// authoritative for EVERYONE (same as sidebar modules; no admin bypass, so unchecking a tab
 /// actually hides it even for admins):
 ///   • No tab rows at all     → DEFAULT: view every tab, edit none.
-///   • Any tab row configured → EXPLICIT: only View-granted tabs are visible; Edit follows CanEdit.
+///   • Any tab row configured → EXPLICIT: Can View is the visibility switch (uncheck it → tab hidden,
+///     even if Can Edit is still ticked). Editing a tab requires BOTH Can View and Can Edit.
 /// </summary>
 public sealed class ClientTabPermissionRepository
 {
@@ -48,8 +49,8 @@ public sealed class ClientTabPermissionRepository
             var key = r.ModuleName.StartsWith("clienttab-", StringComparison.OrdinalIgnoreCase)
                 ? r.ModuleName.Substring("clienttab-".Length) : r.ModuleName;
             bool canView, canEdit;
-            if (!anyConfigured) { canView = true; canEdit = false; }        // default: view all, edit none (unconfigured)
-            else { canEdit = r.CanEdit; canView = r.CanView || r.CanEdit; } // explicit; edit implies view
+            if (!anyConfigured) { canView = true; canEdit = false; }          // default: view all, edit none (unconfigured)
+            else { canView = r.CanView; canEdit = r.CanView && r.CanEdit; }    // explicit; Can View is the visibility switch (edit requires view)
             return new ClientTabPermissionDto { Key = key, CanView = canView, CanEdit = canEdit };
         }).ToList();
     }

@@ -1,6 +1,7 @@
 using Dapper;
 using Indus360.Api.Data;
 using Indus360.Api.Models;
+using Microsoft.Data.SqlClient;
 
 namespace Indus360.Api.Repositories;
 
@@ -67,6 +68,17 @@ public sealed class ClientRepository
         await using var db = await _db.OpenAsync();
         var p = new { code };
         var milestones = (await db.QueryAsync<Milestone>("SELECT * FROM app.Milestones WHERE ClientCode=@code AND ISNULL(IsDeletedTransaction,0)=0 ORDER BY SortOrder, Id", p)).ToList();
+        if (milestones.Count == 0)
+        {
+            // First tracker view of a client (incl. newly-provisioned ones) → seed the fixed roadmap.
+            // Best-effort: a seeding hiccup must never break the tracker load.
+            try
+            {
+                await SeedMilestonesAsync(db, code, null);
+                milestones = (await db.QueryAsync<Milestone>("SELECT * FROM app.Milestones WHERE ClientCode=@code AND ISNULL(IsDeletedTransaction,0)=0 ORDER BY SortOrder, Id", p)).ToList();
+            }
+            catch { /* ignore — tracker still loads (empty milestones) */ }
+        }
         var training = (await db.QueryAsync<TrainingUpdate>("SELECT * FROM app.TrainingUpdates WHERE ClientCode=@code AND ISNULL(IsDeletedTransaction,0)=0 ORDER BY Id DESC", p)).ToList();
         var cr = (await db.QueryAsync<ChangeRequest>("SELECT * FROM app.ChangeRequests WHERE ClientCode=@code AND ISNULL(IsDeletedTransaction,0)=0 ORDER BY Id DESC", p)).ToList();
         var support = (await db.QueryAsync<SupportLog>("SELECT * FROM app.SupportLogs WHERE ClientCode=@code AND ISNULL(IsDeletedTransaction,0)=0 ORDER BY Id DESC", p)).ToList();
@@ -77,6 +89,7 @@ public sealed class ClientRepository
     // ---------------- Milestones ----------------
     public async Task<int> AddMilestoneAsync(Milestone m)
     {
+        DeriveMilestoneVariance(m);
         const string sql = @"INSERT INTO app.Milestones
             (ClientCode,MilestoneGroup,Name,TaskTimeline,PlannedDate,ActualDate,EndDate,ResPerson,Status,
              StartDateVariance,ScheduledStartStatus,RemarkStartDelay,TimelineVariance,TimelineVarianceStatus,RemarkDuration,SortOrder,Emailed,Tasked,CreatedBy)
@@ -86,8 +99,152 @@ public sealed class ClientRepository
         await using var db = await _db.OpenAsync();
         return await db.ExecuteScalarAsync<int>(sql, m);
     }
+
+    // ── Fixed "Roadmap to Success" milestone template ──────────────────────────────────────────
+    // Seeded into EVERY client's tracker: existing clients via POST /api/clients/seed-milestone-template,
+    // new clients lazily on their first tracker view (see GetTrackerAsync). Only Group + Phase are
+    // filled — Task Timeline / dates / status start empty for the team to complete per client.
+    public static readonly (string Group, string Name, string Timeline)[] MilestoneTemplate =
+    {
+        ("Milestone-1", "Order Date", "0"),
+        ("Milestone-1", "Database Configuration", "0"),
+        ("Milestone-1", "Kick-Off and Masters Email", "1"),
+        ("Milestone-1", "Internal Kick-Off Meeting", "1"),
+        ("Milestone-1", "Kick-Off Meeting With Client", "0"),
+        ("Milestone-2", "Master Configuration & Preparation", "3"),
+        ("Milestone-2", "Remaining Requirement Gathering (Masters)", "3"),
+        ("Milestone-2", "Master Data Upload", "1"),
+        ("Milestone-2", "Testing 3 Job (Start to End)", "1"),
+        ("Milestone-3", "Implementation and Trainings", "6"),
+        ("Milestone-3", "User Practice", "3"),
+        ("Milestone-3", "Proposed Deliverable", "0"),
+        ("Milestone-3", "Sign-Off (Completion Date)", "1"),
+        ("Milestone-4", "Support", "NA"),
+    };
+
+    /// <summary>Insert the fixed milestone template for a client — ONLY if it has no milestones yet
+    /// (idempotent). Returns rows inserted (0 if the client already had milestones).</summary>
+    private static async Task<int> SeedMilestonesAsync(SqlConnection db, string code, int? createdBy)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return 0;
+        var existing = await db.ExecuteScalarAsync<int>(
+            "SELECT COUNT(*) FROM app.Milestones WHERE ClientCode=@code AND ISNULL(IsDeletedTransaction,0)=0", new { code });
+        if (existing > 0) return 0;
+        const string ins = @"INSERT INTO app.Milestones (ClientCode,MilestoneGroup,Name,TaskTimeline,Status,SortOrder,Emailed,Tasked,CreatedBy,CreatedDate)
+                             VALUES (@code,@grp,@name,@tl,'',@sort,0,0,@createdBy,SYSDATETIME());";
+        int sort = 1;
+        foreach (var (grp, name, tl) in MilestoneTemplate)
+            await db.ExecuteAsync(ins, new { code, grp, name, tl, sort = sort++, createdBy });
+        return MilestoneTemplate.Length;
+    }
+
+    /// <summary>Seed the milestone template for one client (idempotent).</summary>
+    public async Task<int> SeedMilestonesAsync(string code, int? createdBy = null)
+    {
+        await using var db = await _db.OpenAsync();
+        return await SeedMilestonesAsync(db, code, createdBy);
+    }
+
+    /// <summary>Bulk-seed the template for many client codes (skips any that already have
+    /// milestones). Returns (clients processed, rows inserted).</summary>
+    public async Task<(int clients, int seeded, int failed)> SeedMilestonesForAllAsync(IEnumerable<string?> codes, int? createdBy = null)
+    {
+        int clients = 0, seeded = 0, failed = 0;
+        foreach (var code in codes.Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c!).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            clients++;
+            // Own (pooled) connection per client + per-client isolation: one bad client / transient
+            // network drop can't abort the whole backfill (and re-running resumes — it's idempotent).
+            try { seeded += await SeedMilestonesAsync(code, createdBy); }
+            catch { failed++; }
+        }
+        return (clients, seeded, failed);
+    }
+
+    // ── Roadmap auto-init on Database creation ─────────────────────────────────────────────────
+    // When a client's DB is provisioned: Order Date phase gets today's date in Estimated/Actual/End,
+    // Res.Person = the CRM sales person, Status = Complete, Timeline Var Status = On Time; every later
+    // phase's Estimated Start cascades from the previous one by its Task Timeline in days — SKIPPING
+    // SUNDAYS only (Mon–Sat count). Dates stored as yyyy-MM-dd (what the date fields use).
+    public async Task InitRoadmapAsync(string code, string? salesPerson, int? actorUserId)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return;
+        await using var db = await _db.OpenAsync();
+        await SeedMilestonesAsync(db, code, actorUserId);   // ensure the template exists (idempotent)
+        var rows = (await db.QueryAsync<Milestone>(
+            "SELECT * FROM app.Milestones WHERE ClientCode=@code AND ISNULL(IsDeletedTransaction,0)=0 ORDER BY SortOrder, Id",
+            new { code })).ToList();
+        if (rows.Count == 0) return;
+
+        var today = DateTime.Today;
+        static string Iso(DateTime d) => d.ToString("yyyy-MM-dd");
+
+        // Estimated Start cascade: phase[0] = today; phase[i] = phase[i-1] + THIS phase's own TaskTimeline
+        // (skip Sundays). e.g. Kick-Off Email (Timeline 1) = previous date + 1.
+        var planned = new DateTime[rows.Count];
+        planned[0] = today;
+        for (int i = 1; i < rows.Count; i++)
+            planned[i] = AddSkippingSundays(planned[i - 1], ParseDays(rows[i].TaskTimeline));
+
+        for (int i = 0; i < rows.Count; i++)
+        {
+            if (i == 0)
+                await db.ExecuteAsync(@"UPDATE app.Milestones SET PlannedDate=@p, ActualDate=@p, EndDate=@p,
+                    ResPerson=@res, Status='Complete', TimelineVarianceStatus='On Time', StartDateVariance='0',
+                    ModifiedBy=@mod, ModifiedDate=SYSDATETIME() WHERE Id=@id",
+                    new { p = Iso(planned[0]), res = salesPerson, mod = actorUserId, id = rows[0].Id });
+            else
+                await db.ExecuteAsync(
+                    "UPDATE app.Milestones SET PlannedDate=@p, ModifiedBy=@mod, ModifiedDate=SYSDATETIME() WHERE Id=@id",
+                    new { p = Iso(planned[i]), mod = actorUserId, id = rows[i].Id });
+        }
+    }
+
+    /// <summary>Add <paramref name="days"/> to a date counting Mon–Sat only (Sundays are skipped, not counted).</summary>
+    private static DateTime AddSkippingSundays(DateTime start, int days)
+    {
+        var d = start;
+        for (int added = 0; added < days;)
+        {
+            d = d.AddDays(1);
+            if (d.DayOfWeek != DayOfWeek.Sunday) added++;
+        }
+        return d;
+    }
+
+    private static int ParseDays(string? t) => int.TryParse((t ?? "").Trim(), out var n) && n > 0 ? n : 0;
+
+    /// <summary>Auto-derive Start Date Variance (Actual − Estimated, days) + Timeline Variance Status
+    /// ("On Time" when Actual ≤ Estimated, else "Delayed") from the dates — both must be valid.
+    /// Applied on every milestone add/update so the status is always in sync with the dates.</summary>
+    private static void DeriveMilestoneVariance(Milestone m)
+    {
+        if (DateTime.TryParse(m.PlannedDate, out var est) && DateTime.TryParse(m.ActualDate, out var act))
+        {
+            m.StartDateVariance = ((int)(act.Date - est.Date).TotalDays).ToString();
+            m.TimelineVarianceStatus = act.Date > est.Date ? "Delayed" : "On Time";
+        }
+    }
+
+    // Phases that auto-complete (Actual Start = today, Status = Complete) the day their email is sent
+    // to the client — the Kick-Off email and the Sign-Off.
+    private static readonly HashSet<string> AutoCompleteOnEmailPhases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Kick-Off and Masters Email",
+        "Sign-Off (Completion Date)",
+    };
+
     public async Task<bool> UpdateMilestoneAsync(Milestone m)
     {
+        // Auto-complete these phases the day their email is sent to the client: when the row gets flagged
+        // emailed and has no Actual Start yet → Actual Start = today, Status = Complete.
+        if (m.Emailed && m.Name != null && AutoCompleteOnEmailPhases.Contains(m.Name.Trim())
+            && string.IsNullOrWhiteSpace(m.ActualDate))
+        {
+            m.ActualDate = DateTime.Today.ToString("yyyy-MM-dd");
+            m.Status = "Complete";
+        }
+        DeriveMilestoneVariance(m);   // derive variance/status from planned + (possibly just-set) actual
         const string sql = @"UPDATE app.Milestones SET MilestoneGroup=@MilestoneGroup,Name=@Name,TaskTimeline=@TaskTimeline,PlannedDate=@PlannedDate,
             ActualDate=@ActualDate,EndDate=@EndDate,ResPerson=@ResPerson,Status=@Status,StartDateVariance=@StartDateVariance,
             ScheduledStartStatus=@ScheduledStartStatus,RemarkStartDelay=@RemarkStartDelay,TimelineVariance=@TimelineVariance,
@@ -323,6 +480,106 @@ public sealed class ClientRepository
             cr);
 
         return (crId, clientCode!, false);
+    }
+
+    /// <summary>
+    /// "Send To → Task" for a Tracker row (Milestone / Training / Change Request): appends the row
+    /// as a line item to the ACTING (logged-in) user's TODAY Daily Worklog DRAFT in the internal CRM
+    /// app (IndusInternalApp), then marks the tracker row Tasked=1. The user is matched to an
+    /// IndusInternalApp employee BY EMAIL (never by name — duplicate names exist). Draft worklog +
+    /// entries live in IndusAppDB (reached via the IndusApp connection, same DB the CRM picker uses);
+    /// tracker rows + the acting user's email live in the app schema (Default connection).
+    /// Append-only (does NOT replace the day's other entries). Returns (ok, message).
+    /// </summary>
+    public async Task<(bool ok, string message)> SendTrackerRowToWorklogAsync(
+        string clientCode, string entity, int rowId, string? clientName, int? actingUserId)
+    {
+        entity = (entity ?? "").Trim().ToLowerInvariant();
+        var projectLabel = (clientName ?? "").Trim();
+
+        // 1) Acting user's email (app schema / Default conn) — the ONLY key we map to an employee.
+        string? email;
+        await using (var app = await _db.OpenAsync())
+        {
+            var u = await app.QuerySingleOrDefaultAsync("SELECT Email FROM app.Users WHERE UserId=@id", new { id = actingUserId });
+            email = ((string?)u?.Email)?.Trim();
+        }
+        if (string.IsNullOrWhiteSpace(email))
+            return (false, "Your account has no email on file, so it can't be matched to an IndusInternalApp employee.");
+
+        // 2) The tracker row → worklog Title + Description (Default conn, app schema).
+        string title = "", description = "";
+        await using (var app = await _db.OpenAsync())
+        {
+            if (entity == "milestone")
+            {
+                var r = await app.QuerySingleOrDefaultAsync("SELECT Name, MilestoneGroup FROM app.Milestones WHERE Id=@rowId AND ClientCode=@clientCode AND ISNULL(IsDeletedTransaction,0)=0", new { rowId, clientCode });
+                if (r is null) return (false, "Milestone row not found.");
+                title = ((string?)r.Name ?? "").Trim();
+                var grp = ((string?)r.MilestoneGroup ?? "").Trim();
+                description = (grp != "" ? $"Roadmap: {grp}" : "") + (projectLabel != "" ? $" - Client: {projectLabel}" : "");
+            }
+            else if (entity == "training")
+            {
+                var r = await app.QuerySingleOrDefaultAsync("SELECT ModuleName, SubModule, Details FROM app.TrainingUpdates WHERE Id=@rowId AND ClientCode=@clientCode AND ISNULL(IsDeletedTransaction,0)=0", new { rowId, clientCode });
+                if (r is null) return (false, "Training row not found.");
+                title = ((string?)r.ModuleName ?? "").Trim();
+                var sub = ((string?)r.SubModule ?? "").Trim();
+                var det = ((string?)r.Details ?? "").Trim();
+                description = (sub != "" ? $"Sub Module: {sub}. " : "") + det + (projectLabel != "" ? $" - Client: {projectLabel}" : "");
+            }
+            else if (entity == "changerequest")
+            {
+                var r = await app.QuerySingleOrDefaultAsync("SELECT ModuleName, Description FROM app.ChangeRequests WHERE Id=@rowId AND ClientCode=@clientCode AND ISNULL(IsDeletedTransaction,0)=0", new { rowId, clientCode });
+                if (r is null) return (false, "Change request row not found.");
+                title = ((string?)r.ModuleName ?? "").Trim();
+                description = ((string?)r.Description ?? "").Trim() + (projectLabel != "" ? $" - Client: {projectLabel}" : "");
+            }
+            else return (false, "Unknown tracker entity.");
+        }
+        if (string.IsNullOrWhiteSpace(title)) title = projectLabel != "" ? projectLabel : "Tracker task";
+
+        // 3) IndusInternalApp DB (IndusApp conn): resolve employee, find-or-create today's Draft, append entry.
+        await using (var hr = await _db.OpenAppDbAsync())
+        {
+            var empId = await hr.ExecuteScalarAsync<int?>("SELECT TOP 1 EmployeeID FROM dbo.Employees WHERE Email=@e ORDER BY EmployeeID", new { e = email });
+            if (empId is null || empId <= 0)
+                return (false, $"Your email ({email}) is not linked to an IndusInternalApp employee, so no worklog could be created.");
+
+            // If the client name matches a real project, link it (shows in cost report); else free-text label.
+            int? projectId = projectLabel == "" ? null
+                : await hr.ExecuteScalarAsync<int?>("SELECT TOP 1 ProjectID FROM dbo.Projects WHERE IsDeleted=0 AND ProjectName=@n ORDER BY ProjectID", new { n = projectLabel });
+
+            var existing = await hr.QuerySingleOrDefaultAsync("SELECT WorkLogID, Status FROM dbo.DailyWorkLog WHERE EmployeeID=@e AND WorkDate=CAST(GETDATE() AS date)", new { e = empId });
+            int workLogId;
+            if (existing is not null)
+            {
+                if (string.Equals((string?)existing.Status, "Approved", StringComparison.OrdinalIgnoreCase))
+                    return (false, "Today's worklog is already approved and can no longer be edited.");
+                workLogId = (int)existing.WorkLogID;
+            }
+            else
+            {
+                workLogId = await hr.ExecuteScalarAsync<int>(@"
+                    INSERT INTO dbo.DailyWorkLog (EmployeeID, WorkDate, Status, CreatedAt)
+                    OUTPUT INSERTED.WorkLogID
+                    VALUES (@e, CAST(GETDATE() AS date), 'Draft', GETDATE());", new { e = empId });
+            }
+
+            await hr.ExecuteAsync(@"
+                INSERT INTO dbo.DailyWorkEntry (WorkLogID, Title, Description, Category, ProjectID, ProjectLabel, TaskID, Hours, ProjectTimeLogID, CreatedAt)
+                VALUES (@W, @Title, @Desc, NULL, @P, @PL, NULL, 0, NULL, GETDATE());",
+                new { W = workLogId, Title = title, Desc = string.IsNullOrWhiteSpace(description) ? null : description.Trim(),
+                      P = projectId, PL = projectId.HasValue ? (string?)null : (projectLabel == "" ? null : projectLabel) });
+        }
+
+        // 4) Mark the tracker row Tasked=1 (so the ✓ shows) — Default conn, app schema.
+        var table = entity switch { "milestone" => "Milestones", "training" => "TrainingUpdates", "changerequest" => "ChangeRequests", _ => null };
+        if (table != null)
+            await using (var app = await _db.OpenAsync())
+                await app.ExecuteAsync($"UPDATE app.{table} SET Tasked=1, ModifiedBy=@u, ModifiedDate=SYSDATETIME() WHERE Id=@rowId", new { rowId, u = actingUserId });
+
+        return (true, "Added to today's Draft worklog.");
     }
 
     // ---------------- Support ----------------

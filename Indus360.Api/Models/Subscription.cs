@@ -57,6 +57,7 @@ public class SubscriptionDto
     public string? StatusDescription { get; set; }
     public string? SubscriptionStatusMessage { get; set; }
     public long? LoginAllowed { get; set; }
+    public int? UserLimit { get; set; }
     public string? Gstin { get; set; }
     public string? LatestVersion { get; set; }
     public string? Email { get; set; }
@@ -69,6 +70,9 @@ public class SubscriptionDto
     public DateTime? CloudFromDate { get; set; }
     public DateTime? CloudToDate { get; set; }
     public DateTime? CloudPaymentDueDate { get; set; }
+    // Subscription period ("1 Month" … "2 Year") — drives the To Date / Payment Due auto-calc; now persisted.
+    public string? ErpSubscriptionPeriod { get; set; }
+    public string? CloudSubscriptionPeriod { get; set; }
 }
 
 /// <summary>Create/update payload — carries OriginalCompanyUserID to support key rename on edit.</summary>

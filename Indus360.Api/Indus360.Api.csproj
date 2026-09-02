@@ -13,4 +13,14 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="7.2.0" />
   </ItemGroup>
 
+  <!-- Ship the shared master Excel templates with every publish (seed data for the Template
+       Master Excel tab). Runtime uploads/deletes still go to the deployed copy on the server;
+       _deleted (soft-delete) files are not published. -->
+  <ItemGroup>
+    <Content Include="master-templates\**\*" Exclude="master-templates\_deleted\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

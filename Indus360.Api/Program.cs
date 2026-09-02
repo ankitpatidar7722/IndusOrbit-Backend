@@ -17,6 +17,7 @@ builder.Services.AddSingleton<Db>();
 builder.Services.AddScoped<ClientRepository>();
 builder.Services.AddScoped<NavRepository>();
 builder.Services.AddScoped<SubscriptionRepository>();
+builder.Services.AddScoped<ClientExceedRepository>();
 builder.Services.AddScoped<ProvisioningRepository>();
 builder.Services.AddScoped<ModulesRepository>();
 builder.Services.AddScoped<UserAdminRepository>();
