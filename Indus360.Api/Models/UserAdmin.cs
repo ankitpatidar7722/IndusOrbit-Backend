@@ -130,3 +130,9 @@ public sealed class SaveModuleAuthRequest
     public long UserId { get; set; }
     public List<ModuleAuthToggle> Modules { get; set; } = new();
 }
+
+/// <summary>Save a user's granted feature-permission keys (opt-in list).</summary>
+public sealed class SaveFeaturePermissionsRequest
+{
+    public List<string> Keys { get; set; } = new();
+}

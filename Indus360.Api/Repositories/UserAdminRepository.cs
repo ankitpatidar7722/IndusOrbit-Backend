@@ -250,4 +250,26 @@ public sealed class UserAdminRepository
         await tx.CommitAsync();
         return saved;
     }
+
+    /// <summary>Feature-permission keys granted to a user (opt-in — a row's presence = granted).</summary>
+    public async Task<List<string>> GetPermissionsAsync(long userId)
+    {
+        await using var c = await _db.OpenAsync();
+        return (await c.QueryAsync<string>(
+            "SELECT PermissionKey FROM app.UserPermissions WHERE UserId=@userId ORDER BY PermissionKey",
+            new { userId })).ToList();
+    }
+
+    /// <summary>Replace a user's granted feature permissions (delete-all + reinsert the granted keys).</summary>
+    public async Task<int> SavePermissionsAsync(long userId, IEnumerable<string> keys)
+    {
+        var clean = keys?.Where(k => !string.IsNullOrWhiteSpace(k)).Select(k => k.Trim()).Distinct().ToList() ?? new List<string>();
+        await using var c = await _db.OpenAsync();
+        await using var tx = (SqlTransaction)await c.BeginTransactionAsync();
+        await c.ExecuteAsync("DELETE FROM app.UserPermissions WHERE UserId=@userId", new { userId }, tx);
+        foreach (var k in clean)
+            await c.ExecuteAsync("INSERT INTO app.UserPermissions (UserId, PermissionKey) VALUES (@userId, @k)", new { userId, k }, tx);
+        await tx.CommitAsync();
+        return clean.Count;
+    }
 }

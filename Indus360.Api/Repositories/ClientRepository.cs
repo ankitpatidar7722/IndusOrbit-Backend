@@ -226,6 +226,34 @@ public sealed class ClientRepository
         }
     }
 
+    /// <summary>Re-run the Estimated-Start cascade for a client's roadmap, anchored at <paramref name="baseDate"/>
+    /// (the just-saved Order Date row): every LATER phase's Estimated Start (PlannedDate) = the previous
+    /// phase's + that phase's own Task Timeline in days, skipping Sundays — the same rule the DB-creation
+    /// roadmap uses. Only Estimated Start (and derived variance/status where the phase already has an Actual
+    /// Start) is touched; the anchor row itself is left exactly as saved.</summary>
+    private static async Task RecascadeEstimatedStartsAsync(SqlConnection db, string code, DateTime baseDate, int anchorId, int? actorUserId)
+    {
+        var rows = (await db.QueryAsync<Milestone>(
+            "SELECT * FROM app.Milestones WHERE ClientCode=@code AND ISNULL(IsDeletedTransaction,0)=0 ORDER BY SortOrder, Id",
+            new { code })).ToList();
+        int start = rows.FindIndex(r => r.Id == anchorId);
+        if (start < 0) start = 0;   // fall back to the very first row if the anchor wasn't found
+
+        static string Iso(DateTime d) => d.ToString("yyyy-MM-dd");
+        var prev = baseDate;
+        for (int i = start + 1; i < rows.Count; i++)
+        {
+            prev = AddSkippingSundays(prev, ParseDays(rows[i].TaskTimeline));
+            var row = rows[i];
+            row.PlannedDate = Iso(prev);
+            DeriveMilestoneVariance(row);   // keep variance/status in sync if this phase already has an Actual Start
+            await db.ExecuteAsync(
+                @"UPDATE app.Milestones SET PlannedDate=@PlannedDate, StartDateVariance=@StartDateVariance,
+                    TimelineVarianceStatus=@TimelineVarianceStatus, ModifiedBy=@mod, ModifiedDate=SYSDATETIME() WHERE Id=@Id",
+                new { row.PlannedDate, row.StartDateVariance, row.TimelineVarianceStatus, mod = actorUserId, row.Id });
+        }
+    }
+
     // Phases that auto-complete (Actual Start = today, Status = Complete) the day their email is sent
     // to the client — the Kick-Off email and the Sign-Off.
     private static readonly HashSet<string> AutoCompleteOnEmailPhases = new(StringComparer.OrdinalIgnoreCase)
@@ -245,12 +273,33 @@ public sealed class ClientRepository
             m.Status = "Complete";
         }
         DeriveMilestoneVariance(m);   // derive variance/status from planned + (possibly just-set) actual
+
+        await using var db = await _db.OpenAsync();
+
+        // If this is the anchor "Order Date" row, remember its current Estimated Start first, so we can
+        // tell whether the edit actually changed it — we only re-cascade the roadmap when it changed
+        // (or was blank), never when the user edits the Order Date row for some other reason.
+        bool isOrderDate = m.Name != null && string.Equals(m.Name.Trim(), "Order Date", StringComparison.OrdinalIgnoreCase);
+        string? oldPlanned = isOrderDate
+            ? await db.ExecuteScalarAsync<string?>("SELECT PlannedDate FROM app.Milestones WHERE Id=@Id", new { m.Id })
+            : null;
+
         const string sql = @"UPDATE app.Milestones SET MilestoneGroup=@MilestoneGroup,Name=@Name,TaskTimeline=@TaskTimeline,PlannedDate=@PlannedDate,
             ActualDate=@ActualDate,EndDate=@EndDate,ResPerson=@ResPerson,Status=@Status,StartDateVariance=@StartDateVariance,
             ScheduledStartStatus=@ScheduledStartStatus,RemarkStartDelay=@RemarkStartDelay,TimelineVariance=@TimelineVariance,
             TimelineVarianceStatus=@TimelineVarianceStatus,RemarkDuration=@RemarkDuration,Emailed=@Emailed,Tasked=@Tasked,ModifiedBy=@ModifiedBy,ModifiedDate=SYSDATETIME() WHERE Id=@Id;";
-        await using var db = await _db.OpenAsync();
-        return await db.ExecuteAsync(sql, m) > 0;
+        var ok = await db.ExecuteAsync(sql, m) > 0;
+
+        // When the Order Date's Estimated Start is set/changed, re-cascade every LATER phase's Estimated
+        // Start from it (each += its own Task Timeline in days, skipping Sundays). The Tracker refetches
+        // after save, so the recomputed dates appear immediately.
+        if (ok && isOrderDate && !string.IsNullOrWhiteSpace(m.ClientCode)
+            && DateTime.TryParse(m.PlannedDate, out var baseDate)
+            && (!DateTime.TryParse(oldPlanned, out var oldDate) || oldDate.Date != baseDate.Date))
+        {
+            await RecascadeEstimatedStartsAsync(db, m.ClientCode!, baseDate, m.Id, m.ModifiedBy);
+        }
+        return ok;
     }
     public async Task<bool> DeleteMilestoneAsync(int id, int? userId) => await DeleteAsync("Milestones", id, userId);
 

@@ -197,4 +197,19 @@ public sealed class UsersController : ControllerBase
         try { var n = await _repo.SaveModuleAuthAsync(req); return Ok(new { success = true, message = $"Saved authority for {n} module(s).", savedCount = n }); }
         catch (Exception ex) { return Ok(new { success = false, message = ex.Message, savedCount = 0 }); }
     }
+
+    /// <summary>Feature-permission keys granted to a user (opt-in). Also used by the app to gate features for the current user.</summary>
+    [HttpGet("{id:long}/permissions")]
+    public async Task<IActionResult> Permissions(long id)
+    {
+        try { return Ok(new { success = true, data = await _repo.GetPermissionsAsync(id) }); }
+        catch (Exception ex) { return Ok(new { success = false, message = ex.Message, data = Array.Empty<string>() }); }
+    }
+
+    [HttpPost("{id:long}/permissions")]
+    public async Task<IActionResult> SavePermissions(long id, [FromBody] SaveFeaturePermissionsRequest req)
+    {
+        try { var n = await _repo.SavePermissionsAsync(id, req.Keys ?? new List<string>()); return Ok(new { success = true, message = $"Saved {n} permission(s).", savedCount = n }); }
+        catch (Exception ex) { return Ok(new { success = false, message = ex.Message, savedCount = 0 }); }
+    }
 }
