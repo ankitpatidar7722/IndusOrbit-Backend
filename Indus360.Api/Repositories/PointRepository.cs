@@ -20,7 +20,10 @@ public sealed class PointRepository
     // (CreatedByFullName = who created the Ticket i.e. "assigned by"; AudioFilePath = the
     // point's most recent .webm voice-note attachment, if any).
     private const string PointSelect = @"
-        SELECT  p.PointID, p.Title, p.Summary, p.Module, p.SubModule, p.Description, p.Status, p.Priority, p.Category, p.Complexity,
+        SELECT  p.PointID, p.Title, p.Summary,
+                -- Legacy TMS stored the point's Module in `Summary`; new points use the `Module` column.
+                -- Show Module when set, otherwise fall back to Summary so legacy points display their module.
+                ISNULL(NULLIF(LTRIM(RTRIM(p.Module)), ''), p.Summary) AS Module, p.SubModule, p.Description, p.Status, p.Priority, p.Category, p.Complexity,
                 p.CustomerID, c.CompanyName AS CustomerName,
                 p.ProductID, pr.ProductName,
                 p.TicketID, t.TicketNo, tb.FullName AS AssignedByName,
@@ -28,15 +31,15 @@ public sealed class PointRepository
                 p.AssignedToID, au.FullName AS AssignedToName,
                 p.DateCreated, p.ExpectedDate, p.StartDate, p.DateCompleted, p.DateClosed, p.ToDoDate,
                 p.ExpectedMinutes, p.TotalTimeSpent, p.PauseTimeMinutes,
-                p.IsVerified, p.VerificationStatus, p.IsDeveloperPaused, p.SortOrder,
+                p.IsVerified, p.VerificationStatus, p.IsDeveloperPaused, p.SortOrder, p.AdminRemark,
                 aud.FilePath AS AudioFilePath, cr.Id AS TrackerChangeRequestId
         FROM dbo.Points p
         LEFT JOIN dbo.Customers c ON c.CustomerID = p.CustomerID
         LEFT JOIN dbo.Products  pr ON pr.ProductID = p.ProductID
         LEFT JOIN dbo.Tickets   t ON t.TicketID = p.TicketID
-        LEFT JOIN dbo.Users     tb ON tb.UserID = t.CreatedByID
-        LEFT JOIN dbo.Users     ru ON ru.UserID = p.ReportedByID
-        LEFT JOIN dbo.Users     au ON au.UserID = p.AssignedToID
+        LEFT JOIN app.Users     tb ON tb.UserID = t.CreatedByID
+        LEFT JOIN app.Users     ru ON ru.UserID = p.ReportedByID
+        LEFT JOIN app.Users     au ON au.UserID = p.AssignedToID
         OUTER APPLY (SELECT TOP 1 FilePath FROM dbo.PointAttachments pa WHERE pa.PointID = p.PointID AND pa.FilePath LIKE '%.webm' AND ISNULL(pa.IsDeletedTransaction,0) = 0 ORDER BY pa.AttachmentID DESC) aud
         OUTER APPLY (SELECT TOP 1 Id FROM app.ChangeRequests x WHERE x.PointID = p.PointID AND ISNULL(x.IsDeletedTransaction,0) = 0 ORDER BY x.Id DESC) cr ";
 
@@ -78,7 +81,8 @@ public sealed class PointRepository
         string? status, DateTime? from, DateTime? to, int? devId, int? custId, int? reportedBy = null)
     {
         var sql = PointSelect + @"
-            WHERE (@status IS NULL OR @status = 'All' OR p.Status = @status)
+            WHERE ISNULL(p.IsDeletedTransaction,0) = 0
+              AND (@status IS NULL OR @status = 'All' OR p.Status = @status)
               AND (@from IS NULL OR p.DateCreated >= @from)
               AND (@to   IS NULL OR p.DateCreated < DATEADD(DAY,1,@to))
               AND (@devId  IS NULL OR p.AssignedToID = @devId)
@@ -93,7 +97,7 @@ public sealed class PointRepository
     public async Task<IEnumerable<PointGridRow>> GetQueueAsync()
     {
         var sql = PointSelect + @"
-            WHERE p.Status = 'Queue' AND p.IsVerified = 1 AND p.TicketID IS NULL
+            WHERE p.Status = 'Queue' AND p.IsVerified = 1 AND p.TicketID IS NULL AND ISNULL(p.IsDeletedTransaction,0) = 0
             ORDER BY p.Priority DESC, p.DateCreated";
         await using var db = await _db.OpenTmsAsync();
         return await db.QueryAsync<PointGridRow>(sql);
@@ -104,7 +108,7 @@ public sealed class PointRepository
     public async Task<IEnumerable<PointGridRow>> GetVerificationQueueAsync(int verificationStatus)
     {
         var sql = PointSelect + @"
-            WHERE p.VerificationStatus = @verificationStatus AND p.Status = 'Queue'
+            WHERE p.VerificationStatus = @verificationStatus AND p.Status = 'Queue' AND ISNULL(p.IsDeletedTransaction,0) = 0
             ORDER BY p.DateCreated DESC, p.PointID DESC";
         await using var db = await _db.OpenTmsAsync();
         return await db.QueryAsync<PointGridRow>(sql, new { verificationStatus });
@@ -118,6 +122,10 @@ public sealed class PointRepository
     {
         var sql = PointSelect + @"
             WHERE (@devId IS NULL OR p.AssignedToID = @devId)
+              -- Queue points aren't assigned to any developer yet — they belong to the Verify/Assign
+              -- flow, not a developer's task board (matters mainly for the admin 'all devs' view).
+              AND p.Status <> 'Queue'
+              AND ISNULL(p.IsDeletedTransaction,0) = 0
             ORDER BY CASE p.Status WHEN 'SupportVerified' THEN 0 WHEN 'PendingMerge' THEN 1 ELSE 2 END,
                      p.SortOrder ASC, p.PointID DESC";
         await using var db = await _db.OpenTmsAsync();
@@ -160,7 +168,8 @@ public sealed class PointRepository
     {
         const string sql = @"
             SELECT  p.PointID, p.Title, p.Summary, p.Description, p.Status, p.Priority, p.Category, p.Complexity,
-                    p.Module, p.SubModule,
+                    -- Legacy points keep their Module in `Summary`; fall back to it when Module is blank.
+                    ISNULL(NULLIF(LTRIM(RTRIM(p.Module)), ''), p.Summary) AS Module, p.SubModule,
                     c.CompanyName AS CustomerName, pr.ProductName, t.TicketNo,
                     au.FullName AS AssignedToName, ru.FullName AS ReportedByName,
                     p.ExpectedMinutes, p.TotalTimeSpent, p.PauseTimeMinutes, p.IsDeveloperPaused,
@@ -170,8 +179,8 @@ public sealed class PointRepository
             LEFT JOIN dbo.Customers c ON c.CustomerID = p.CustomerID
             LEFT JOIN dbo.Products  pr ON pr.ProductID = p.ProductID
             LEFT JOIN dbo.Tickets   t ON t.TicketID = p.TicketID
-            LEFT JOIN dbo.Users     au ON au.UserID = p.AssignedToID
-            LEFT JOIN dbo.Users     ru ON ru.UserID = p.ReportedByID
+            LEFT JOIN app.Users     au ON au.UserID = p.AssignedToID
+            LEFT JOIN app.Users     ru ON ru.UserID = p.ReportedByID
             WHERE p.PointID = @pointId";
         await using var db = await _db.OpenTmsAsync();
         return await db.QuerySingleOrDefaultAsync<PointDetail>(sql, new { pointId });
@@ -185,9 +194,9 @@ public sealed class PointRepository
                     h.CycleStatus, h.StartDate, h.CompleteDate, h.TimeSpentMinutes, h.ExtraTimeMinutes,
                     h.DeveloperRemark, h.TesterRemark, h.SupportRemark
             FROM dbo.PointHistory h
-            LEFT JOIN dbo.Users d  ON d.UserID  = h.DeveloperID
-            LEFT JOIN dbo.Users te ON te.UserID = h.TesterID
-            LEFT JOIN dbo.Users s  ON s.UserID  = h.SupportID
+            LEFT JOIN app.Users d  ON d.UserID  = h.DeveloperID
+            LEFT JOIN app.Users te ON te.UserID = h.TesterID
+            LEFT JOIN app.Users s  ON s.UserID  = h.SupportID
             WHERE h.PointID = @pointId
             ORDER BY h.HistoryID";
         await using var db = await _db.OpenTmsAsync();

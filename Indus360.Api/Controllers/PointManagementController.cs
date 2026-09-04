@@ -89,6 +89,26 @@ public sealed class PointManagementController : ControllerBase
         return Ok(new { pointId = id });
     }
 
+    // ---------------- Edit / Delete a Queue point (Manage Points) ----------------
+    /// <summary>Edit an editable (Queue-status) point. Returns { ok, message } (ok=false with a reason
+    /// when the point isn't a Queue point) so the client can surface the message.</summary>
+    [HttpPut("points/{id:int}")]
+    public async Task<IActionResult> UpdatePoint(int id, [FromBody] NewPointRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req.Description))
+            return Ok(new { ok = false, message = "Description is required." });
+        var (ok, message) = await _workflow.UpdateQueuePointAsync(id, req);
+        return Ok(new { ok, message });
+    }
+
+    /// <summary>Soft-delete a Queue point (IsDeletedTransaction=1). ok=false when it isn't a Queue point.</summary>
+    [HttpDelete("points/{id:int}")]
+    public async Task<IActionResult> DeletePoint(int id)
+    {
+        var (ok, message) = await _workflow.DeleteQueuePointAsync(id);
+        return Ok(new { ok, message });
+    }
+
     // ---------------- Triage (Verify Tickets) ----------------
     [HttpGet("points/verification")]
     public async Task<IActionResult> GetVerificationQueue([FromQuery] int vs = 0)
@@ -103,6 +123,11 @@ public sealed class PointManagementController : ControllerBase
     [HttpPost("points/{id:int}/unactive")]
     public async Task<IActionResult> UnActive(int id, [FromBody] UnActiveRequest req)
         => await _workflow.MarkUnActiveAsync(id, req?.AdminRemark) ? Ok(new { ok = true }) : NotFound();
+
+    /// <summary>Undo an "Un-Active" — put a rejected point back in the pending verification queue.</summary>
+    [HttpPost("points/{id:int}/reactivate")]
+    public async Task<IActionResult> Reactivate(int id)
+        => await _workflow.ReactivateAsync(id) ? Ok(new { ok = true }) : NotFound();
 
     // ---------------- Role boards ----------------
     [HttpGet("developer/board")]

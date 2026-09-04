@@ -19,49 +19,25 @@ public sealed class TmsAdminRepository
     {
         await using var db = await _db.OpenTmsAsync();
         return await db.QueryAsync<PmUser>(
-            "SELECT UserID, FullName, Email, Role, IsActive, WhatsAppNumber FROM dbo.Users ORDER BY FullName");
+            "SELECT UserId AS UserID, FullName, Email, Role, IsActive, Mobile AS WhatsAppNumber FROM app.Users ORDER BY FullName");
     }
 
-    /// <summary>Create/update a TMS user AND upsert the matching Indus360App login (by email).</summary>
+    /// <summary>Create/update a user — unified on app.Users (Point Management + the app login are the same table now).</summary>
     public async Task<int> UpsertUserAsync(TmsUserSave u)
     {
-        int id;
-        await using (var tms = await _db.OpenTmsAsync())
+        await using var db = await _db.OpenTmsAsync();
+        if (u.UserID > 0)
         {
-            if (u.UserID > 0)
-            {
-                await tms.ExecuteAsync(@"
-                    UPDATE dbo.Users SET FullName=@FullName, Email=@Email, Role=@Role, IsActive=@IsActive, WhatsAppNumber=@WhatsAppNumber,
-                        PasswordHash = CASE WHEN @Password IS NOT NULL AND @Password <> '' THEN @Password ELSE PasswordHash END
-                    WHERE UserID=@UserID", u);
-                id = u.UserID;
-            }
-            else
-            {
-                id = await tms.ExecuteScalarAsync<int>(@"
-                    INSERT INTO dbo.Users (FullName, Email, PasswordHash, Role, IsActive, DateCreated, EmailVerified, WhatsAppNumber)
-                    OUTPUT INSERTED.UserID
-                    VALUES (@FullName, @Email, @Password, @Role, @IsActive, GETDATE(), 1, @WhatsAppNumber)", u);
-            }
+            await db.ExecuteAsync(@"
+                UPDATE app.Users SET FullName=@FullName, Email=@Email, Role=@Role, IsActive=@IsActive, Mobile=@WhatsAppNumber,
+                    PasswordHash = CASE WHEN @Password IS NOT NULL AND @Password <> '' THEN @Password ELSE PasswordHash END
+                WHERE UserId=@UserID", u);
+            return u.UserID;
         }
-
-        // Sync the Indus 360 app login (app schema) so the user can sign in.
-        await using (var app = await _db.OpenAsync())
-        {
-            var exists = await app.ExecuteScalarAsync<int>("SELECT COUNT(*) FROM app.Users WHERE Email=@Email", new { u.Email });
-            if (exists > 0)
-                await app.ExecuteAsync(@"
-                    UPDATE app.Users SET FullName=@FullName, Role=@Role, IsActive=@IsActive,
-                        PasswordHash = CASE WHEN @Password IS NOT NULL AND @Password <> '' THEN @Password ELSE PasswordHash END
-                    WHERE Email=@Email", u);
-            else
-                await app.ExecuteAsync(@"
-                    INSERT INTO app.Users (FullName, Email, PasswordHash, Role, IsActive, CompanyId, ProductionUnitId, FYear, CompanyUsername, CompanyPassword, CreatedAt)
-                    VALUES (@FullName, @Email, COALESCE(NULLIF(@Password,''),'indus@123'), @Role, @IsActive, 1, 1, '2026-2027',
-                            (SELECT TOP 1 CompanyUsername FROM app.Users WHERE UserId=1),
-                            (SELECT TOP 1 CompanyPassword FROM app.Users WHERE UserId=1), SYSDATETIME())", u);
-        }
-        return id;
+        return await db.ExecuteScalarAsync<int>(@"
+            INSERT INTO app.Users (FullName, Email, PasswordHash, Role, IsActive, Mobile, CompanyId, ProductionUnitId, FYear, CreatedAt)
+            OUTPUT INSERTED.UserId
+            VALUES (@FullName, @Email, COALESCE(NULLIF(@Password,''),'indus@123'), @Role, @IsActive, @WhatsAppNumber, 1, 1, '2026-2027', SYSDATETIME())", u);
     }
 
     public async Task SetUserActiveAsync(int userId, bool active)
@@ -69,8 +45,8 @@ public sealed class TmsAdminRepository
         // TMS side
         await using (var tms = await _db.OpenTmsAsync())
         {
-            var email = await tms.ExecuteScalarAsync<string?>("SELECT Email FROM dbo.Users WHERE UserID=@userId", new { userId });
-            await tms.ExecuteAsync("UPDATE dbo.Users SET IsActive=@active WHERE UserID=@userId", new { userId, active });
+            var email = await tms.ExecuteScalarAsync<string?>("SELECT Email FROM app.Users WHERE UserID=@userId", new { userId });
+            await tms.ExecuteAsync("UPDATE app.Users SET IsActive=@active WHERE UserID=@userId", new { userId, active });
             if (!string.IsNullOrWhiteSpace(email))
             {
                 await using var app = await _db.OpenAsync();

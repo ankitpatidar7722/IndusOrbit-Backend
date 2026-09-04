@@ -326,4 +326,5 @@ public sealed class PointGridRow
     public int? SortOrder { get; set; }
     public string? AudioFilePath { get; set; }
     public int? TrackerChangeRequestId { get; set; }   // set once this point has been sent to a client Tracker
+    public string? AdminRemark { get; set; }           // reject reason (Verify Tickets → Un-Active)
 }

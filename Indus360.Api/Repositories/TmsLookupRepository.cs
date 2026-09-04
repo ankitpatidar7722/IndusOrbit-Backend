@@ -17,11 +17,11 @@ public sealed class TmsLookupRepository
     public async Task<IEnumerable<PmUser>> GetUsersAsync(string? role = null)
     {
         await using var db = await _db.OpenTmsAsync();
-        // Exclude users disabled in dbo.Users OR in the app login (app.Users, matched by email) —
+        // Exclude users disabled in app.Users OR in the app login (app.Users, matched by email) —
         // inactive users must never appear in an assignee picker. See inactive-user convention.
         const string sql = @"
-            SELECT u.UserID, u.FullName, u.Email, u.Role, u.IsActive, u.WhatsAppNumber
-            FROM dbo.Users u
+            SELECT u.UserId AS UserID, u.FullName, u.Email, u.Role, u.IsActive, u.Mobile AS WhatsAppNumber
+            FROM app.Users u
             WHERE u.IsActive = 1
               AND (@role IS NULL OR u.Role = @role)
               AND NOT EXISTS (

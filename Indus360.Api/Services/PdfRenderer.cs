@@ -55,7 +55,9 @@ public sealed class PdfRenderer
                 "--disable-extensions",
                 "--run-all-compositor-stages-before-draw",
                 "--virtual-time-budget=8000",
-                "--print-to-pdf-no-header",
+                // Remove the browser's own date/title/URL header+footer. NOTE: --print-to-pdf-no-header
+                // is IGNORED under --headless=new; --no-pdf-header-footer is the flag that actually works.
+                "--no-pdf-header-footer",
                 $"--print-to-pdf={outPath}",
                 new Uri(inPath).AbsoluteUri, // file:///…
             }) psi.ArgumentList.Add(a);

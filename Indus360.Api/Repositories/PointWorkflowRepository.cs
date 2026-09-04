@@ -35,15 +35,9 @@ public sealed class PointWorkflowRepository
                     new { n = name });
         }
 
-        // The Add Point form no longer has a Title field — Title is still a NOT NULL column, so
-        // derive one from the Description (first line, capped to fit the 250-char column) when blank.
-        if (string.IsNullOrWhiteSpace(p.Title))
-        {
-            var line = (p.Description ?? "").Trim();
-            var nl = line.IndexOfAny(new[] { '\r', '\n' });
-            if (nl >= 0) line = line[..nl].Trim();
-            p.Title = line.Length > 120 ? line[..120].TrimEnd() + "…" : (line.Length > 0 ? line : "Untitled Point");
-        }
+        // Title is OPTIONAL — keep it exactly as entered; a blank Title stays blank (never copied
+        // from the Description). Normalise null→"" so the NOT NULL column is satisfied.
+        p.Title = (p.Title ?? "").Trim();
 
         const string sql = @"
             INSERT INTO dbo.Points
@@ -56,6 +50,58 @@ public sealed class PointWorkflowRepository
                  'Queue', @Priority, @Category, @Complexity, GETDATE(),
                  0, 0, 0, 0);";
         return await db.ExecuteScalarAsync<int>(sql, p);
+    }
+
+    // ---------------- Edit / Delete a Queue point (Manage Points) ----------------
+    /// <summary>Update an editable (Queue-status) point. Only Queue points can be edited — once a point
+    /// is assigned / in-flight, edits are blocked. Resolves CustomerName→CustomerID like create.</summary>
+    public async Task<(bool ok, string? message)> UpdateQueuePointAsync(int pointId, NewPointRequest p)
+    {
+        await using var db = await _db.OpenTmsAsync();
+
+        var status = await db.ExecuteScalarAsync<string?>(
+            "SELECT Status FROM dbo.Points WHERE PointID=@pointId AND ISNULL(IsDeletedTransaction,0)=0", new { pointId });
+        if (status is null) return (false, "Point not found.");
+        if (!string.Equals(status.Trim(), "Queue", StringComparison.OrdinalIgnoreCase))
+            return (false, $"Only Queue points can be edited (this point is '{status}').");
+
+        // Resolve the customer the same way create does (find-or-create by company name).
+        if (p.CustomerID <= 0 && !string.IsNullOrWhiteSpace(p.CustomerName))
+        {
+            var name = p.CustomerName.Trim();
+            p.CustomerID = await db.ExecuteScalarAsync<int?>(
+                "SELECT TOP 1 CustomerID FROM dbo.Customers WHERE CompanyName=@n ORDER BY CustomerID", new { n = name }) ?? 0;
+            if (p.CustomerID <= 0)
+                p.CustomerID = await db.ExecuteScalarAsync<int>(
+                    "INSERT INTO dbo.Customers (CustomerName, CompanyName, IsActive, DateCreated) OUTPUT INSERTED.CustomerID VALUES (@n, @n, 1, GETDATE())",
+                    new { n = name });
+        }
+
+        p.Title = (p.Title ?? "").Trim(); // optional — blank stays blank, never derived from Description
+
+        var rows = await db.ExecuteAsync(@"
+            UPDATE dbo.Points SET
+                Title=@Title, Module=@Module, SubModule=@SubModule, Description=@Description,
+                CustomerID = CASE WHEN @CustomerID > 0 THEN @CustomerID ELSE CustomerID END,
+                ProductID  = CASE WHEN @ProductID  > 0 THEN @ProductID  ELSE ProductID  END,
+                Priority=@Priority, Category=@Category, Complexity=@Complexity
+            WHERE PointID=@pointId AND Status='Queue' AND ISNULL(IsDeletedTransaction,0)=0",
+            new { pointId, p.Title, p.Module, p.SubModule, p.Description, p.CustomerID, p.ProductID, p.Priority, p.Category, p.Complexity });
+        return rows > 0 ? (true, null) : (false, "Point could not be updated.");
+    }
+
+    /// <summary>Soft-delete a Queue point (IsDeletedTransaction=1). Blocked once the point leaves Queue.</summary>
+    public async Task<(bool ok, string? message)> DeleteQueuePointAsync(int pointId)
+    {
+        await using var db = await _db.OpenTmsAsync();
+        var status = await db.ExecuteScalarAsync<string?>(
+            "SELECT Status FROM dbo.Points WHERE PointID=@pointId AND ISNULL(IsDeletedTransaction,0)=0", new { pointId });
+        if (status is null) return (false, "Point not found or already deleted.");
+        if (!string.Equals(status.Trim(), "Queue", StringComparison.OrdinalIgnoreCase))
+            return (false, $"Only Queue points can be deleted (this point is '{status}').");
+        var rows = await db.ExecuteAsync(
+            "UPDATE dbo.Points SET IsDeletedTransaction=1 WHERE PointID=@pointId AND Status='Queue'", new { pointId });
+        return rows > 0 ? (true, null) : (false, "Point could not be deleted.");
     }
 
     // ---------------- Triage (VerifyTicket) ----------------
@@ -90,6 +136,18 @@ public sealed class PointWorkflowRepository
             WHERE PointID = @pointId;";
         await using var db = await _db.OpenTmsAsync();
         return await db.ExecuteAsync(sql, new { pointId, adminRemark }) > 0;
+    }
+
+    /// <summary>Re-activate an un-active (rejected) point — put it back in the pending verification
+    /// queue (VerificationStatus 2 → 0). Lets an accidental "Un-Active" be undone from Verify Tickets.</summary>
+    public async Task<bool> ReactivateAsync(int pointId)
+    {
+        const string sql = @"
+            UPDATE dbo.Points
+            SET VerificationStatus = 0, AdminRemark = NULL
+            WHERE PointID = @pointId AND VerificationStatus = 2;";
+        await using var db = await _db.OpenTmsAsync();
+        return await db.ExecuteAsync(sql, new { pointId }) > 0;
     }
 
     // ---------------- Developer timer (mirrors DataAccess Time Tracking region) ----------------

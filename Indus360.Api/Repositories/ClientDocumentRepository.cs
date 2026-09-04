@@ -71,4 +71,16 @@ public sealed class ClientDocumentRepository
             WHERE ClientCode = @clientCode",
             new { clientCode });
     }
+
+    /// <summary>Bump the send-revision counter for a client's document — called when the finalized
+    /// document is actually EMAILED to the client. The Sign-Off version shown on next open is
+    /// 1.{Revision}, so the first send stays 1.0, the next becomes 1.1, then 1.2, and so on.
+    /// No-op if the client has no saved row yet (email is only offered once a doc is saved).</summary>
+    public async Task<int> BumpRevisionAsync(string clientCode, string docType)
+    {
+        await using var db = await _db.OpenAsync();
+        return await db.ExecuteAsync(
+            "UPDATE app.ClientDocuments SET Revision = ISNULL(Revision,0) + 1 WHERE ClientCode = @clientCode AND DocType = @docType",
+            new { clientCode, docType = NormalizeType(docType) });
+    }
 }

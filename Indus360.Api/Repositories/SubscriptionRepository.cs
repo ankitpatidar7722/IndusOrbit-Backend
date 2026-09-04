@@ -12,31 +12,44 @@ namespace Indus360.Api.Repositories;
 public sealed class SubscriptionRepository
 {
     private readonly Db _db;
-    public SubscriptionRepository(Db db) => _db = db;
+    private readonly Services.CacheService _cache;
+    public SubscriptionRepository(Db db, Services.CacheService cache) { _db = db; _cache = cache; }
 
     private const string Table = "dbo.Indus_Company_Authentication_For_Web_Modules";
 
+    // Cached reads all hit the REMOTE control DB — the heaviest queries under concurrent load.
+    // 60s TTL + explicit bust on every subscription write (Create/Update/SoftDelete), so a change
+    // made in Indus 360 shows immediately and only external changes wait out the short TTL.
+    private const string KAll = "subs:all";
+    private const string KStats = "subs:stats";
+    private const string KAppUrls = "subs:appurls";
+    private const string KDropdown = "subs:dropdown";
+    private static readonly TimeSpan Ttl = TimeSpan.FromSeconds(60);
+    private void BustCaches() => _cache.Remove(KAll, KStats, KAppUrls, KDropdown);
+
     /// <summary>Distinct non-empty ApplicationBaseURL values — for the Application URL dropdown.</summary>
-    public async Task<IEnumerable<string>> GetAppBaseUrlsAsync()
-    {
-        using var c = await _db.OpenControlAsync();
-        return await c.QueryAsync<string>($@"
+    public async Task<IEnumerable<string>> GetAppBaseUrlsAsync() =>
+        await _cache.GetOrCreateAsync(KAppUrls, Ttl, async () =>
+        {
+            using var c = await _db.OpenControlAsync();
+            return (await c.QueryAsync<string>($@"
             SELECT DISTINCT ApplicationBaseURL FROM {Table}
             WHERE NULLIF(LTRIM(RTRIM(ApplicationBaseURL)),'') IS NOT NULL
-            ORDER BY ApplicationBaseURL");
-    }
+            ORDER BY ApplicationBaseURL")).ToList();
+        });
 
-    public async Task<IEnumerable<SubscriptionCard>> GetAllAsync()
-    {
-        using var c = await _db.OpenControlAsync();
-        return await c.QueryAsync<SubscriptionCard>($@"
+    public async Task<IEnumerable<SubscriptionCard>> GetAllAsync() =>
+        await _cache.GetOrCreateAsync(KAll, Ttl, async () =>
+        {
+            using var c = await _db.OpenControlAsync();
+            return (await c.QueryAsync<SubscriptionCard>($@"
             SELECT CompanyUserID, CompanyUniqueCode, CompanyName, CompanyCode, ApplicationName, ApplicationVersion,
                    SubscriptionStatus, StatusDescription, SubscriptionStatusMessage, Address, City, State, Country,
                    GSTIN, Email, Mobile, FromDate, ToDate, PaymentDueDate, LoginAllowed, LastLoginDateTime, CloudSubscriptionStatus
             FROM {Table}
             WHERE ISNULL(IsActive,1) = 1
-            ORDER BY CompanyName");
-    }
+            ORDER BY CompanyName")).ToList();
+        });
 
     /// <summary>True if the user's role is admin. Admins see ALL clients (bypass Project Assignment).
     /// Queries the LOCAL app.Users (not the prod control DB).</summary>
@@ -104,13 +117,14 @@ public sealed class SubscriptionRepository
                @Email, @Mobile, @Address, @ApplicationBaseURL, 1, @IsMessageActive, @MessageDurationValue, @MessageDurationType,
                @CloudSubscriptionStatus, @CloudFromDate, @CloudToDate, @CloudPaymentDueDate,
                @ErpSubscriptionPeriod, @CloudSubscriptionPeriod)", r);
+        BustCaches(); // new subscription → refresh cached list/stats/dropdown/urls immediately
     }
 
     public async Task<int> UpdateAsync(SubscriptionSaveRequest r)
     {
         var key = string.IsNullOrWhiteSpace(r.OriginalCompanyUserID) ? r.CompanyUserID : r.OriginalCompanyUserID;
         using var c = await _db.OpenControlAsync();
-        return await c.ExecuteAsync($@"
+        var rows = await c.ExecuteAsync($@"
             UPDATE {Table} SET
               CompanyUserID=@CompanyUserID, Password=@Password, Conn_String=@Conn_String, CompanyName=@CompanyName,
               ApplicationName=@ApplicationName, ApplicationVersion=@ApplicationVersion, Country=@Country, State=@State,
@@ -132,6 +146,8 @@ public sealed class SubscriptionRepository
                 r.ErpSubscriptionPeriod, r.CloudSubscriptionPeriod,
                 Key = key,
             });
+        BustCaches(); // edited subscription → refresh cached list/stats/dropdown/urls immediately
+        return rows;
     }
 
     /// <summary>
@@ -153,34 +169,38 @@ public sealed class SubscriptionRepository
     public async Task<int> SoftDeleteAsync(string companyUserId)
     {
         using var c = await _db.OpenControlAsync();
-        return await c.ExecuteAsync(
+        var rows = await c.ExecuteAsync(
             $"UPDATE {Table} SET IsActive=0 WHERE CompanyUserID=@companyUserId", new { companyUserId });
+        BustCaches(); // deleted subscription → refresh cached list/stats/dropdown/urls immediately
+        return rows;
     }
 
     /// <summary>Non-Desktop clients for the copy-modules target dropdown.</summary>
-    public async Task<IEnumerable<ClientDropdownItem>> GetClientDropdownAsync()
-    {
-        using var c = await _db.OpenControlAsync();
-        return await c.QueryAsync<ClientDropdownItem>($@"
+    public async Task<IEnumerable<ClientDropdownItem>> GetClientDropdownAsync() =>
+        await _cache.GetOrCreateAsync(KDropdown, Ttl, async () =>
+        {
+            using var c = await _db.OpenControlAsync();
+            return (await c.QueryAsync<ClientDropdownItem>($@"
             SELECT CompanyName, CompanyUserID, ApplicationName
             FROM {Table}
             WHERE ISNULL(IsActive,1) = 1 AND ISNULL(ApplicationName,'') <> 'Desktop'
-            ORDER BY CompanyName");
-    }
+            ORDER BY CompanyName")).ToList();
+        });
 
     /// <summary>Summary counts for the Customers header stats.</summary>
-    public async Task<(int total, int active, int expired)> GetStatsAsync()
-    {
-        using var c = await _db.OpenControlAsync();
-        var row = await c.QuerySingleAsync($@"
+    public async Task<(int total, int active, int expired)> GetStatsAsync() =>
+        await _cache.GetOrCreateAsync(KStats, Ttl, async () =>
+        {
+            using var c = await _db.OpenControlAsync();
+            var row = await c.QuerySingleAsync($@"
             SELECT
                 COUNT(*) AS Total,
                 SUM(CASE WHEN SubscriptionStatus = 'Active'  THEN 1 ELSE 0 END) AS Active,
                 SUM(CASE WHEN SubscriptionStatus = 'Expired' THEN 1 ELSE 0 END) AS Expired
             FROM {Table}
             WHERE ISNULL(IsActive,1) = 1");
-        return ((int)row.Total, (int)(row.Active ?? 0), (int)(row.Expired ?? 0));
-    }
+            return ((int)row.Total, (int)(row.Active ?? 0), (int)(row.Expired ?? 0));
+        });
 
     // ---------------- Message Format templates (dbo.MessageFormatMaster, Indus control DB) ----------------
     private const string MsgTable = "dbo.MessageFormatMaster";

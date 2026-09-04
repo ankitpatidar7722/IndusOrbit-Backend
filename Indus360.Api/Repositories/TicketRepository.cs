@@ -47,8 +47,8 @@ public sealed class TicketRepository
                    (SELECT COUNT(*) FROM dbo.Points p WHERE p.TicketID = t.TicketID) AS PointCount,
                    (SELECT COUNT(*) FROM dbo.Points p WHERE p.TicketID = t.TicketID AND p.Status NOT IN ('Closed','Reject')) AS OpenCount
             FROM dbo.Tickets t
-            LEFT JOIN dbo.Users u  ON u.UserID = t.AssignedToID
-            LEFT JOIN dbo.Users cu ON cu.UserID = t.CreatedByID
+            LEFT JOIN app.Users u  ON u.UserID = t.AssignedToID
+            LEFT JOIN app.Users cu ON cu.UserID = t.CreatedByID
             ORDER BY t.DateCreated DESC, t.TicketID DESC";
         await using var db = await _db.OpenTmsAsync();
         return await db.QueryAsync<TicketRow>(sql);
@@ -77,12 +77,14 @@ public sealed class TicketRepository
                    t.CreatedByID AS AssignedByID, ab.FullName AS AssignedByName, t.DateCreated AS AssignDate,
                    ru.FullName AS ReportedByName,
                    p.Status, p.Priority, p.Description,
-                   c.CompanyName AS CustomerName, pr.ProductName, p.Module, p.SubModule
+                   c.CompanyName AS CustomerName, pr.ProductName,
+                   -- Legacy TMS stored Module in `Summary`; fall back to it when the Module column is blank.
+                   ISNULL(NULLIF(LTRIM(RTRIM(p.Module)), ''), p.Summary) AS Module, p.SubModule
             FROM dbo.Points p
             JOIN dbo.Tickets t ON t.TicketID = p.TicketID
-            LEFT JOIN dbo.Users au ON au.UserID = p.AssignedToID
-            LEFT JOIN dbo.Users ab ON ab.UserID = t.CreatedByID
-            LEFT JOIN dbo.Users ru ON ru.UserID = p.ReportedByID
+            LEFT JOIN app.Users au ON au.UserID = p.AssignedToID
+            LEFT JOIN app.Users ab ON ab.UserID = t.CreatedByID
+            LEFT JOIN app.Users ru ON ru.UserID = p.ReportedByID
             LEFT JOIN dbo.Customers c ON c.CustomerID = p.CustomerID
             LEFT JOIN dbo.Products  pr ON pr.ProductID = p.ProductID
             WHERE p.TicketID IS NOT NULL

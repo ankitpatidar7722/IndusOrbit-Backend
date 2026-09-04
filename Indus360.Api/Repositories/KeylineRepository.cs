@@ -18,20 +18,26 @@ public sealed class KeylineModuleRow
 public sealed class KeylineRepository
 {
     private readonly string _cs;
-    public KeylineRepository(IConfiguration cfg)
-        => _cs = cfg.GetConnectionString("IndusKeyline")
-           ?? throw new InvalidOperationException("ConnectionStrings:IndusKeyline not configured.");
-
-    /// <summary>Every (head, sub-module) pair, so the client can build both dropdowns + cascade.</summary>
-    public async Task<List<KeylineModuleRow>> GetModulesAsync()
+    private readonly Services.CacheService _cache;
+    public KeylineRepository(IConfiguration cfg, Services.CacheService cache)
     {
-        using var c = new SqlConnection(_cs);
-        await c.OpenAsync();
-        return (await c.QueryAsync<KeylineModuleRow>(@"
+        _cs = cfg.GetConnectionString("IndusKeyline")
+           ?? throw new InvalidOperationException("ConnectionStrings:IndusKeyline not configured.");
+        _cache = cache;
+    }
+
+    /// <summary>Every (head, sub-module) pair, so the client can build both dropdowns + cascade.
+    /// This is static reference data on a remote DB — cached 30 min (no writes happen here).</summary>
+    public async Task<List<KeylineModuleRow>> GetModulesAsync() =>
+        await _cache.GetOrCreateAsync("keyline:modules", TimeSpan.FromMinutes(30), async () =>
+        {
+            using var c = new SqlConnection(_cs);
+            await c.OpenAsync();
+            return (await c.QueryAsync<KeylineModuleRow>(@"
             SELECT DISTINCT ModuleHeadDisplayName AS Head, ModuleDisplayName AS Name
             FROM dbo.ModuleMaster
             WHERE NULLIF(LTRIM(RTRIM(ModuleHeadDisplayName)),'') IS NOT NULL
               AND NULLIF(LTRIM(RTRIM(ModuleDisplayName)),'') IS NOT NULL
             ORDER BY ModuleHeadDisplayName, ModuleDisplayName")).ToList();
-    }
+        });
 }

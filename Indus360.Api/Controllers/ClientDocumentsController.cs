@@ -77,4 +77,30 @@ public sealed class ClientDocumentsController : ControllerBase
         var safe = $"{docType}-{clientCode}".Replace(' ', '-');
         return File(bytes, "application/pdf", $"{safe}.pdf");
     }
+
+    /// <summary>Record that the finalized document was emailed to the client — bumps the send
+    /// revision so the Sign-Off Version increments (1.0 → 1.1 → 1.2 …) on the next open.</summary>
+    [HttpPost("{clientCode}/{docType}/mark-sent")]
+    public async Task<IActionResult> MarkSent(string clientCode, string docType)
+    {
+        var n = await _repo.BumpRevisionAsync(clientCode, docType);
+        return Ok(new { success = true, bumped = n });
+    }
+
+    /// <summary>Render the CURRENT (possibly-unsaved) document HTML to a clean PDF (headless
+    /// print, no browser date/title/URL headers) — used by the in-window "Print / Save as PDF"
+    /// button so the output has no browser chrome. 503 when no server browser is available
+    /// (the caller then falls back to window.print()).</summary>
+    [HttpPost("render-pdf")]
+    public async Task<IActionResult> RenderPdf([FromBody] RenderPdfRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req?.HtmlContent))
+            return BadRequest("Document content is empty.");
+        if (!_pdf.IsAvailable)
+            return StatusCode(503, "PDF rendering is unavailable (no browser found on the server).");
+        var bytes = await _pdf.RenderAsync(req.HtmlContent);
+        if (bytes is null || bytes.Length == 0)
+            return StatusCode(500, "Could not render the PDF.");
+        return File(bytes, "application/pdf", "document.pdf");
+    }
 }

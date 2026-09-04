@@ -31,8 +31,8 @@ public sealed class TmsReportRepository
             FROM dbo.Points p
             LEFT JOIN dbo.Customers c ON c.CustomerID = p.CustomerID
             LEFT JOIN dbo.Products  pr ON pr.ProductID = p.ProductID
-            LEFT JOIN dbo.Users     ru ON ru.UserID = p.ReportedByID
-            LEFT JOIN dbo.Users     au ON au.UserID = p.AssignedToID
+            LEFT JOIN app.Users     ru ON ru.UserID = p.ReportedByID
+            LEFT JOIN app.Users     au ON au.UserID = p.AssignedToID
             WHERE p.TicketID IS NOT NULL
               AND (@custId IS NULL OR p.CustomerID = @custId)
               AND (@devId  IS NULL OR p.AssignedToID = @devId)

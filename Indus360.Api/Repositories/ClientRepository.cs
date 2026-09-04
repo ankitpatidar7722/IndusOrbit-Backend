@@ -12,7 +12,8 @@ namespace Indus360.Api.Repositories;
 public sealed class ClientRepository
 {
     private readonly Db _db;
-    public ClientRepository(Db db) => _db = db;
+    private readonly Services.CacheService _cache;
+    public ClientRepository(Db db, Services.CacheService cache) { _db = db; _cache = cache; }
 
     // ---------------- Clients ----------------
     public async Task<IEnumerable<ClientListItem>> GetAllAsync()
@@ -670,18 +671,21 @@ public sealed class ClientRepository
     public async Task<bool> DeleteOnsiteAsync(int id, int? userId) => await DeleteAsync("OnsiteVisits", id, userId);
 
     // ---------------- Dashboard ----------------
-    public async Task<(int total, int inImpl, int goLive, int openCr)> GetStatsAsync()
-    {
-        const string sql = @"
+    // Dashboard KPI widget — cached 30s (TTL only; a high-level count being a few seconds stale is
+    // fine, and it spares the app DB from a 4-subquery aggregate on every concurrent dashboard load).
+    public async Task<(int total, int inImpl, int goLive, int openCr)> GetStatsAsync() =>
+        await _cache.GetOrCreateAsync("dashboard:stats", TimeSpan.FromSeconds(30), async () =>
+        {
+            const string sql = @"
             SELECT
               (SELECT COUNT(*) FROM app.Clients) AS Total,
               (SELECT COUNT(*) FROM app.Clients WHERE Status IN ('Provisioning','Training','Pending Kick-Off')) AS InImpl,
               (SELECT COUNT(*) FROM app.Clients WHERE Status = 'Go-Live') AS GoLive,
               (SELECT COUNT(*) FROM app.ChangeRequests WHERE Status = 'Open' AND ISNULL(IsDeletedTransaction,0)=0) AS OpenCr;";
-        await using var db = await _db.OpenAsync();
-        var r = await db.QuerySingleAsync(sql);
-        return ((int)r.Total, (int)r.InImpl, (int)r.GoLive, (int)r.OpenCr);
-    }
+            await using var db = await _db.OpenAsync();
+            var r = await db.QuerySingleAsync(sql);
+            return ((int)r.Total, (int)r.InImpl, (int)r.GoLive, (int)r.OpenCr);
+        });
 
     // callers pass a bare table name (Milestones/TrainingUpdates/ChangeRequests/SupportLogs/OnsiteVisits) — all in the app schema.
     // SOFT delete: mark IsDeletedTransaction=1 + audit (DeletedBy/DeletedDate) instead of removing the row.

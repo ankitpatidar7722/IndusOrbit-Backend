@@ -14,6 +14,10 @@ builder.Services.AddSwaggerGen();
 
 // Data access (Dapper) — one connection factory, scoped repository
 builder.Services.AddSingleton<Db>();
+// In-memory cache for read-heavy shared-DB data (subscription list/stats, keyline catalog,
+// dashboard KPIs) — cuts repeated remote-DB queries under concurrent load. See CacheService.
+builder.Services.AddMemoryCache();
+builder.Services.AddSingleton<Indus360.Api.Services.CacheService>();
 builder.Services.AddScoped<ClientRepository>();
 builder.Services.AddScoped<NavRepository>();
 builder.Services.AddScoped<SubscriptionRepository>();
@@ -40,6 +44,7 @@ builder.Services.AddScoped<NotificationRepository>();
 builder.Services.AddScoped<AttachmentRepository>();
 // Client Kick-Off / Sign-Off finalized documents (save / view / download)
 builder.Services.AddScoped<ClientDocumentRepository>();
+builder.Services.AddScoped<SignoffDataRepository>();
 builder.Services.AddScoped<KeylineRepository>();
 // CRM client picker (reads IndusAppDB.dbo.Customers — the internal CRM app's data, same DB)
 builder.Services.AddScoped<CrmRepository>();

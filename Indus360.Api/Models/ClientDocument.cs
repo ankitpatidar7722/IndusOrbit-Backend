@@ -35,3 +35,9 @@ public sealed class SaveClientDocumentRequest
     public int? SavedByUserId { get; set; }
     public string? SavedByName { get; set; }
 }
+
+/// <summary>Render arbitrary (current, possibly-unsaved) document HTML to a clean PDF.</summary>
+public sealed class RenderPdfRequest
+{
+    public string HtmlContent { get; set; } = "";
+}

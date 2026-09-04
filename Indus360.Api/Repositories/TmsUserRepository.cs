@@ -49,7 +49,7 @@ public sealed class TmsUserRepository
             await using var tms = await _db.OpenTmsAsync();
             var row = await tms.QuerySingleOrDefaultAsync(@"
                 SELECT TOP 1 UserID, ISNULL(Role,'') AS Role, ISNULL(FullName,'') AS FullName
-                FROM dbo.Users WHERE Email = @email",
+                FROM app.Users WHERE Email = @email",
                 new { email });
             if (row is not null)
             {
