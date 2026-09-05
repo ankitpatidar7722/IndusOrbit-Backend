@@ -143,6 +143,43 @@ public sealed class EmailRepository
             new { take, clientCode, pointId });
     }
 
+    /// <summary>Distinct recipient addresses this sender has emailed before (To/Cc/Bcc of their
+    /// successful sends), most-recent first — powers the Gmail-style autocomplete in the composer.
+    /// When <paramref name="forEmail"/> is null, suggests across all senders (company-wide).</summary>
+    public async Task<IEnumerable<EmailAddressDto>> GetRecipientSuggestionsAsync(string? forEmail, int scanRows = 400)
+    {
+        await using var db = await _db.OpenAsync();
+        var rows = await db.QueryAsync<RecipJsonRow>(@"
+            SELECT TOP (@scanRows) ToJson, CcJson, BccJson
+            FROM app.EmailHistory
+            WHERE Status = 'Sent'
+              AND (@forEmail IS NULL OR SentByEmail = @forEmail)
+            ORDER BY Id DESC",
+            new { scanRows, forEmail });
+
+        // Dedupe by lowercased email; rows are newest-first, so the first time we see an
+        // address is its most-recent use → that order is preserved for the suggestion list.
+        var seen = new Dictionary<string, EmailAddressDto>(StringComparer.OrdinalIgnoreCase);
+        void Absorb(string? json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return;
+            List<EmailAddressDto>? list;
+            try { list = JsonSerializer.Deserialize<List<EmailAddressDto>>(json, Json); }
+            catch { return; }
+            if (list is null) return;
+            foreach (var a in list)
+            {
+                var email = a?.Email?.Trim();
+                if (string.IsNullOrEmpty(email) || seen.ContainsKey(email)) continue;
+                seen[email] = new EmailAddressDto { Email = email, Name = string.IsNullOrWhiteSpace(a!.Name) ? null : a.Name!.Trim() };
+            }
+        }
+        foreach (var r in rows) { Absorb(r.ToJson); Absorb(r.CcJson); Absorb(r.BccJson); }
+        return seen.Values;
+    }
+
+    private sealed class RecipJsonRow { public string? ToJson { get; set; } public string? CcJson { get; set; } public string? BccJson { get; set; } }
+
     private static string FormatAddr(EmailAddressDto a)
         => string.IsNullOrWhiteSpace(a.Name) ? a.Email : $"{a.Name} <{a.Email}>";
 

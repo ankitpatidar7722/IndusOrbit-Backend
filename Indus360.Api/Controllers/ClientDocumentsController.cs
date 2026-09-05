@@ -78,13 +78,31 @@ public sealed class ClientDocumentsController : ControllerBase
         return File(bytes, "application/pdf", $"{safe}.pdf");
     }
 
-    /// <summary>Record that the finalized document was emailed to the client — bumps the send
-    /// revision so the Sign-Off Version increments (1.0 → 1.1 → 1.2 …) on the next open.</summary>
+    /// <summary>Record that the finalized document was emailed to the client — logs an audit entry
+    /// (who / to whom / version) and bumps the send revision so the Sign-Off Version increments
+    /// (1.0 → 1.1 → 1.2 …) on the next open.</summary>
     [HttpPost("{clientCode}/{docType}/mark-sent")]
-    public async Task<IActionResult> MarkSent(string clientCode, string docType)
+    public async Task<IActionResult> MarkSent(string clientCode, string docType, [FromBody] MarkSentRequest? req)
     {
-        var n = await _repo.BumpRevisionAsync(clientCode, docType);
+        var n = await _repo.MarkSentAsync(clientCode, docType, req?.ActorUserId, req?.ActorName, req?.Recipient);
         return Ok(new { success = true, bumped = n });
+    }
+
+    /// <summary>Full Save + Email audit trail for a client's document (newest first).</summary>
+    [HttpGet("{clientCode}/{docType}/history")]
+    public async Task<IActionResult> History(string clientCode, string docType)
+    {
+        var rows = await _repo.GetHistoryAsync(clientCode, docType);
+        return Ok(new { success = true, data = rows });
+    }
+
+    /// <summary>Current document version ("1.{send-revision}") — used to fill / patch the version
+    /// on the Kick-Off &amp; Sign-Off documents so it reflects the number of times sent.</summary>
+    [HttpGet("{clientCode}/{docType}/version")]
+    public async Task<IActionResult> Version(string clientCode, string docType)
+    {
+        var version = await _repo.GetVersionAsync(clientCode, docType);
+        return Ok(new { success = true, version });
     }
 
     /// <summary>Render the CURRENT (possibly-unsaved) document HTML to a clean PDF (headless

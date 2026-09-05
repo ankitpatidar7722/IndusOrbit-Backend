@@ -113,6 +113,37 @@ public sealed class SignoffDataRepository
                 "SELECT Revision FROM app.ClientDocuments WHERE ClientCode = @code AND DocType = 'SignOff'",
                 new { code = docCode }) ?? 0;
             d.Version = $"1.{rev}";
+
+            // §8 Support Email options — distinct emails of active Support-role app users.
+            try
+            {
+                d.SupportEmails = (await app.QueryAsync<string>(
+                    @"SELECT DISTINCT Email FROM app.Users
+                      WHERE Role = 'Support' AND ISNULL(IsActive,0) = 1 AND ISNULL(IsDeletedTransaction,0) = 0
+                        AND NULLIF(LTRIM(RTRIM(Email)),'') IS NOT NULL
+                      ORDER BY Email")).ToList();
+            }
+            catch { /* leave empty — cell falls back to the default support email */ }
+
+            // Name/email → mobile map (active users): lets §8 Support Contact follow §2
+            // Implementation Engineer client-side as the user edits the name.
+            try
+            {
+                var rows = await app.QueryAsync(
+                    @"SELECT FullName, Email, Mobile FROM app.Users
+                      WHERE ISNULL(IsActive,0) = 1 AND ISNULL(IsDeletedTransaction,0) = 0
+                        AND NULLIF(LTRIM(RTRIM(Mobile)),'') IS NOT NULL");
+                foreach (var r in rows)
+                {
+                    string mob = ((string?)r.Mobile ?? "").Trim();
+                    if (mob.Length == 0) continue;
+                    string n = ((string?)r.FullName ?? "").Trim().ToLowerInvariant();
+                    string em = ((string?)r.Email ?? "").Trim().ToLowerInvariant();
+                    if (n.Length > 0 && !d.UserMobiles.ContainsKey(n)) d.UserMobiles[n] = mob;
+                    if (em.Length > 0 && !d.UserMobiles.ContainsKey(em)) d.UserMobiles[em] = mob;
+                }
+            }
+            catch { /* leave empty — Support Contact simply won't auto-derive */ }
         }
         catch { d.Version = "1.0"; }
 

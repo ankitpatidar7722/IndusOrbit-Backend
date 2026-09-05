@@ -26,5 +26,7 @@ public sealed class SignoffData
     public string ImplementationEngineerMobile { get; set; } = ""; // that engineer's app.Users mobile
     public string ImplementationHead { get; set; } = "Mahesh Patidar";
     public string SupportEmail { get; set; } = "maheshpatidar.indusanalytics@gmail.com";
+    public List<string> SupportEmails { get; set; } = new();     // §8 Support Email multi-select options: app.Users Role='Support', active
+    public Dictionary<string, string> UserMobiles { get; set; } = new(); // lower(name|email) → mobile; lets §8 Support Contact follow §2 Implementation Engineer client-side
     public List<string> InScopeModules { get; set; } = new();   // module head-names present in the client DB
 }

@@ -135,6 +135,12 @@ public sealed class EmailController : ControllerBase
     public async Task<IActionResult> History([FromQuery] string? clientCode, [FromQuery] int? pointId, [FromQuery] int take = 100)
         => Ok(await _repo.GetHistoryAsync(clientCode, pointId, Math.Clamp(take, 1, 500)));
 
+    /// <summary>Distinct addresses this user has emailed before (Gmail-style recipient autocomplete).
+    /// Scoped to the given sender when <paramref name="forEmail"/> is supplied.</summary>
+    [HttpGet("recipients")]
+    public async Task<IActionResult> Recipients([FromQuery] string? forEmail)
+        => Ok(await _repo.GetRecipientSuggestionsAsync(string.IsNullOrWhiteSpace(forEmail) ? null : forEmail));
+
     // ─────────────────────────── Templates (app.EmailTemplates) ───────────────────────────
 
     [HttpGet("templates")]

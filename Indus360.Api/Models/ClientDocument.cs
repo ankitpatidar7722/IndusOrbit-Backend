@@ -41,3 +41,25 @@ public sealed class RenderPdfRequest
 {
     public string HtmlContent { get; set; } = "";
 }
+
+/// <summary>One audit-log entry for a client document: a Save or an Email, with who + when.</summary>
+public sealed class ClientDocumentHistoryDto
+{
+    public long HistoryId { get; set; }
+    public string ClientCode { get; set; } = "";
+    public string DocType { get; set; } = "";
+    public string Action { get; set; } = "";     // 'Saved' | 'Emailed'
+    public string? Version { get; set; }          // document version at that moment (e.g. "1.0")
+    public int? ActorUserId { get; set; }
+    public string? ActorName { get; set; }
+    public string? Recipient { get; set; }        // email recipient(s), for 'Emailed'
+    public DateTime CreatedAt { get; set; }
+}
+
+/// <summary>Body for mark-sent: who emailed the finalized document, and to whom.</summary>
+public sealed class MarkSentRequest
+{
+    public int? ActorUserId { get; set; }
+    public string? ActorName { get; set; }
+    public string? Recipient { get; set; }
+}
