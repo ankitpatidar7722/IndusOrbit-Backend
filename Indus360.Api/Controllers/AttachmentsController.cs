@@ -1,4 +1,5 @@
 using Indus360.Api.Repositories;
+using Indus360.Api.Services;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Indus360.Api.Controllers;
@@ -17,7 +18,7 @@ public sealed class AttachmentsController : ControllerBase
         _env = env;
     }
 
-    private string UploadDir => Path.Combine(_env.ContentRootPath, "pm-uploads");
+    private string UploadDir => Path.Combine(_env.UploadsRoot(), "pm-uploads");
 
     [HttpPost("points/{id:int}/attachments")]
     [RequestSizeLimit(52_428_800)] // 50 MB

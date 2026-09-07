@@ -78,7 +78,7 @@ public sealed class CreateRoomRequest
     public string? ParticipantsJson { get; set; }
 }
 public sealed class CreateDMRequest { public long TargetUserID { get; set; } public string? TargetUserName { get; set; } }
-public sealed class SendMessageRequest { public string? Content { get; set; } public string? MessageType { get; set; } public long? ParentMessageID { get; set; } public string? AttachmentsJson { get; set; } }
+public sealed class SendMessageRequest { public string? Content { get; set; } public string? MessageType { get; set; } public long? ParentMessageID { get; set; } public string? AttachmentsJson { get; set; } public List<long>? Mentions { get; set; } }
 public sealed class UpdateRoomRequest { public string? Name { get; set; } public string? Description { get; set; } public bool? IsPublic { get; set; } public bool? IsReadOnly { get; set; } public string? ParticipantsJson { get; set; } }
 public sealed class EditMessageRequest { public string Content { get; set; } = ""; }
 public sealed class ReactionsRequest { public string? ReactionsJson { get; set; } }
@@ -91,6 +91,7 @@ public sealed class MemberInput { public long UserID { get; set; } public string
 public sealed class AddMembersRequest { public List<MemberInput> Members { get; set; } = new(); }
 public sealed class SetReadOnlyRequest { public bool IsReadOnly { get; set; } }
 public sealed class SetRoleRequest { public string Role { get; set; } = "Member"; }
+public sealed class ChatPrefsRequest { public bool? Mute { get; set; } public bool? Pin { get; set; } public bool? Archive { get; set; } }
 
 /// <summary>One participant in a room's Participants JSON array.</summary>
 public sealed class ChatParticipant
@@ -101,5 +102,15 @@ public sealed class ChatParticipant
     [JsonPropertyName("lastReadMessageId")] public long? lastReadMessageId { get; set; }
     [JsonPropertyName("lastReadAt")] public string? lastReadAt { get; set; }
     [JsonPropertyName("isMuted")] public bool isMuted { get; set; }
+    // Per-user chat prefs (WhatsApp-style): pin this chat to the top of MY list; archive it out of MY
+    // main list. Both live per-participant so they never affect other members.
+    [JsonPropertyName("isPinned")] public bool isPinned { get; set; }
+    [JsonPropertyName("archivedAt")] public string? archivedAt { get; set; }
     [JsonPropertyName("joinedAt")] public string? joinedAt { get; set; }
+    // WhatsApp-style soft leave: set when the user leaves/is removed — they stay a "past member"
+    // (read-only history up to this time), never hard-removed. null = active member.
+    [JsonPropertyName("leftAt")] public string? leftAt { get; set; }
+    // Per-user "delete group for me": set when a (usually left) user removes the group from THEIR
+    // list only. The group/messages stay for everyone else. null = visible in their list.
+    [JsonPropertyName("hiddenAt")] public string? hiddenAt { get; set; }
 }

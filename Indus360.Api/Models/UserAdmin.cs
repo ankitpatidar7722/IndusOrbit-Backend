@@ -50,6 +50,12 @@ public sealed class UserPhotoRequest
     public string ImageBase64 { get; set; } = "";
 }
 
+/// <summary>Body for saving a user's own Gemini API key (blank/null clears it).</summary>
+public sealed class GeminiKeyRequest
+{
+    public string? ApiKey { get; set; }
+}
+
 public sealed class UserSaveRequest
 {
     public long UserId { get; set; }               // 0 = create

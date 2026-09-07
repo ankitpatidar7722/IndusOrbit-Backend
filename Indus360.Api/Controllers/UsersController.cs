@@ -1,5 +1,6 @@
 using Indus360.Api.Models;
 using Indus360.Api.Repositories;
+using Indus360.Api.Services;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Indus360.Api.Controllers;
@@ -17,9 +18,10 @@ public sealed class UsersController : ControllerBase
         _env = env;
     }
 
-    // Profile photos live on the backend's own disk (like pm-uploads / chat-uploads),
-    // with the stored filename saved in app.Users.PhotoPath and served back by GET below.
-    private string PhotoDir => Path.Combine(_env.ContentRootPath, "user-uploads");
+    // Profile photos live on the backend's own disk (like pm-uploads / chat-uploads), with the
+    // stored filename saved in app.Users.PhotoPath and served back by GET below. UploadsRoot() keeps
+    // them OUTSIDE the deploy folder so they survive redeploys (see StoragePaths).
+    private string PhotoDir => Path.Combine(_env.UploadsRoot(), "user-uploads");
 
     [HttpGet]
     public async Task<IActionResult> List()
@@ -103,6 +105,28 @@ public sealed class UsersController : ControllerBase
     public async Task<IActionResult> SelfSmtp(long id, [FromBody] UserSaveRequest req)
     {
         try { await _repo.UpdateSelfSmtpAsync(id, req); return Ok(new { success = true, message = "Email settings saved." }); }
+        catch (Exception ex) { return Ok(new { success = false, message = ex.Message }); }
+    }
+
+    /// <summary>Whether the user has a personal Gemini API key set (masked — the key is never returned).</summary>
+    [HttpGet("{id:long}/gemini-key")]
+    public async Task<IActionResult> GetGeminiKey(long id)
+    {
+        try
+        {
+            var key = await _repo.GetGeminiKeyAsync(id);
+            var has = !string.IsNullOrWhiteSpace(key);
+            var masked = has && key!.Length > 4 ? $"…{key[^4..]}" : (has ? "…" : "");
+            return Ok(new { success = true, hasKey = has, masked });
+        }
+        catch (Exception ex) { return Ok(new { success = false, message = ex.Message, hasKey = false, masked = "" }); }
+    }
+
+    /// <summary>Self-service: save (or clear) the user's own Gemini API key for AI summaries.</summary>
+    [HttpPost("{id:long}/self-gemini-key")]
+    public async Task<IActionResult> SelfGeminiKey(long id, [FromBody] GeminiKeyRequest req)
+    {
+        try { await _repo.SetGeminiKeyAsync(id, req?.ApiKey); return Ok(new { success = true, message = string.IsNullOrWhiteSpace(req?.ApiKey) ? "AI key removed." : "AI key saved." }); }
         catch (Exception ex) { return Ok(new { success = false, message = ex.Message }); }
     }
 

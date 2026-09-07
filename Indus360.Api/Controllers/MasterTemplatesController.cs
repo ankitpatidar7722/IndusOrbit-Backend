@@ -1,3 +1,4 @@
+using Indus360.Api.Services;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Indus360.Api.Controllers;
@@ -23,7 +24,7 @@ public sealed class MasterTemplatesController : ControllerBase
     {
         get
         {
-            var d = Path.Combine(_env.ContentRootPath, "master-templates");
+            var d = Path.Combine(_env.UploadsRoot(), "master-templates");
             Directory.CreateDirectory(d);
             return d;
         }

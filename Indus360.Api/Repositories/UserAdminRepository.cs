@@ -61,6 +61,22 @@ public sealed class UserAdminRepository
         return old;
     }
 
+    /// <summary>A user's personal Gemini API key (for AI summaries), or null if not set.</summary>
+    public async Task<string?> GetGeminiKeyAsync(long id)
+    {
+        using var c = await _db.OpenAsync();
+        return await c.ExecuteScalarAsync<string?>("SELECT GeminiApiKey FROM app.Users WHERE UserId=@id", new { id });
+    }
+
+    /// <summary>Self-service: save (or clear) the user's own Gemini API key.</summary>
+    public async Task SetGeminiKeyAsync(long id, string? key)
+    {
+        using var c = await _db.OpenAsync();
+        await c.ExecuteAsync(
+            "UPDATE app.Users SET GeminiApiKey=@key, ModifiedBy=@id, ModifiedDate=SYSDATETIME() WHERE UserId=@id",
+            new { id, key = string.IsNullOrWhiteSpace(key) ? null : key.Trim() });
+    }
+
     public async Task<UserLookups> GetLookupsAsync()
     {
         using var c = await _db.OpenAsync();

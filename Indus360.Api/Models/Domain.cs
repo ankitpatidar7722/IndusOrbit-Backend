@@ -66,6 +66,7 @@ public class Milestone : AuditFields
     public int SortOrder { get; set; }
     public bool Emailed { get; set; }
     public bool Tasked { get; set; }
+    public string? Summary { get; set; }                   // AI (Gemini) generated summary of this row
 }
 
 public class TrainingUpdate : AuditFields
@@ -86,6 +87,7 @@ public class TrainingUpdate : AuditFields
     public string? VideoUrl { get; set; }
     public bool Emailed { get; set; }
     public bool Tasked { get; set; }
+    public string? Summary { get; set; }                   // AI (Gemini) generated summary of this row
 }
 
 public class ChangeRequest : AuditFields
@@ -108,6 +110,7 @@ public class ChangeRequest : AuditFields
     public bool Tasked { get; set; }
     public bool Pointed { get; set; }
     public int? PointID { get; set; }               // Point Management ticket id created from this CR
+    public string? Summary { get; set; }            // AI (Gemini) generated summary of this row
 }
 
 public class SupportLog : AuditFields

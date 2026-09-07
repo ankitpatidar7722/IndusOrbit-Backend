@@ -18,6 +18,9 @@ builder.Services.AddSingleton<Db>();
 // dashboard KPIs) — cuts repeated remote-DB queries under concurrent load. See CacheService.
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<Indus360.Api.Services.CacheService>();
+// Gemini (free API) — tracker row AI summaries. Stateless; key read from config/env at call time.
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<Indus360.Api.Services.GeminiService>();
 builder.Services.AddScoped<ClientRepository>();
 builder.Services.AddScoped<NavRepository>();
 builder.Services.AddScoped<SubscriptionRepository>();

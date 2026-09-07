@@ -45,7 +45,8 @@ public sealed class MessagingRepository
             FROM app.ChatRooms r
             WHERE r.CompanyID = @CompanyID AND r.IsDeleted = 0
               AND (@Type IS NULL OR r.Type = @Type)
-              AND (EXISTS (SELECT 1 FROM OPENJSON(ISNULL(r.Participants,'[]')) p WHERE JSON_VALUE(p.value,'$.userId') = CAST(@UserID AS NVARCHAR(20)))
+              -- participant (active OR left) who hasn't deleted the room for themselves (hiddenAt)
+              AND (EXISTS (SELECT 1 FROM OPENJSON(ISNULL(r.Participants,'[]')) p WHERE JSON_VALUE(p.value,'$.userId') = CAST(@UserID AS NVARCHAR(20)) AND JSON_VALUE(p.value,'$.hiddenAt') IS NULL)
                    OR (r.Type = 'Channel' AND r.IsPublic = 1))
             ORDER BY (CASE WHEN r.LastMessageAt IS NULL THEN r.CreatedDate ELSE r.LastMessageAt END) DESC",
             new { CompanyID = companyId, UserID = userId, Type = type });
@@ -125,7 +126,7 @@ public sealed class MessagingRepository
             SELECT CASE WHEN EXISTS (
                 SELECT 1 FROM app.ChatRooms r
                 WHERE r.RoomID = @RoomID AND r.CompanyID = @CompanyID AND r.IsDeleted = 0
-                  AND (EXISTS (SELECT 1 FROM OPENJSON(ISNULL(r.Participants,'[]')) p WHERE JSON_VALUE(p.value,'$.userId') = CAST(@UserID AS NVARCHAR(20)))
+                  AND (EXISTS (SELECT 1 FROM OPENJSON(ISNULL(r.Participants,'[]')) p WHERE JSON_VALUE(p.value,'$.userId') = CAST(@UserID AS NVARCHAR(20)) AND JSON_VALUE(p.value,'$.leftAt') IS NULL)
                        OR (r.Type = 'Channel' AND r.IsPublic = 1))
             ) THEN 1 ELSE 0 END",
             new { RoomID = roomId, CompanyID = companyId, UserID = userId }) == 1;
@@ -135,6 +136,16 @@ public sealed class MessagingRepository
     public async Task<IEnumerable<ChatMessageDto>> GetMessagesAsync(int companyId, long roomId, long userId, int page, int pageSize)
     {
         await using var c = await _db.OpenAsync();
+        // If the viewer has LEFT this group, they only see the history UP TO the moment they left
+        // (read-only past conversation — no messages sent after their leave show up).
+        var leftAtStr = await c.ExecuteScalarAsync<string?>(@"
+            SELECT TOP 1 JSON_VALUE(p.value,'$.leftAt')
+            FROM app.ChatRooms r CROSS APPLY OPENJSON(ISNULL(r.Participants,'[]')) p
+            WHERE r.RoomID = @RoomID AND r.CompanyID = @CompanyID
+              AND JSON_VALUE(p.value,'$.userId') = CAST(@UserID AS NVARCHAR(20))",
+            new { RoomID = roomId, CompanyID = companyId, UserID = userId });
+        DateTime? leftAt = DateTime.TryParse(leftAtStr, null, System.Globalization.DateTimeStyles.RoundtripKind, out var la) ? la : (DateTime?)null;
+
         // IsStarred is per-viewing-user (LEFT JOIN stars); "delete for me" rows are excluded via NOT EXISTS.
         var rows = (await c.QueryAsync<ChatMessageDto>($@"
             SELECT {MsgCols},
@@ -143,12 +154,30 @@ public sealed class MessagingRepository
             LEFT JOIN app.Users u ON u.UserId = m.UserID
             LEFT JOIN app.ChatMessageStars st ON st.MessageID = m.MessageID AND st.UserID = @UserID
             WHERE m.CompanyID = @CompanyID AND m.RoomID = @RoomID AND m.ParentMessageID IS NULL
+              AND (@LeftAt IS NULL OR m.CreatedAt <= @LeftAt)
               AND NOT EXISTS (SELECT 1 FROM app.ChatMessageHidden h WHERE h.MessageID = m.MessageID AND h.UserID = @UserID)
             ORDER BY m.CreatedAt DESC
             OFFSET @Off ROWS FETCH NEXT @Take ROWS ONLY",
-            new { CompanyID = companyId, RoomID = roomId, UserID = userId, Off = (page - 1) * pageSize, Take = pageSize })).ToList();
+            new { CompanyID = companyId, RoomID = roomId, UserID = userId, LeftAt = leftAt, Off = (page - 1) * pageSize, Take = pageSize })).ToList();
         rows.Reverse(); // oldest → newest for display
         return rows;
+    }
+
+    /// <summary>All messages in a room that shared an attachment or a link — powers the group's
+    /// "Media, Docs &amp; Links" gallery. Newest first; excludes deleted + the caller's hidden msgs.</summary>
+    public async Task<IEnumerable<ChatMessageDto>> GetSharedMediaAsync(int companyId, long roomId, long userId)
+    {
+        await using var c = await _db.OpenAsync();
+        return await c.QueryAsync<ChatMessageDto>($@"
+            SELECT {MsgCols}
+            FROM app.ChatMessages m
+            LEFT JOIN app.Users u ON u.UserId = m.UserID
+            WHERE m.CompanyID = @CompanyID AND m.RoomID = @RoomID AND m.IsDeleted = 0
+              AND ((m.Attachments IS NOT NULL AND m.Attachments <> '' AND m.Attachments <> '[]')
+                   OR m.Content LIKE '%http://%' OR m.Content LIKE '%https://%')
+              AND NOT EXISTS (SELECT 1 FROM app.ChatMessageHidden h WHERE h.MessageID = m.MessageID AND h.UserID = @UserID)
+            ORDER BY m.CreatedAt DESC",
+            new { CompanyID = companyId, RoomID = roomId, UserID = userId });
     }
 
     /// <summary>Pinned (undeleted) messages of a room, oldest → newest, excluding ones the user hid.</summary>
@@ -399,13 +428,23 @@ public sealed class MessagingRepository
     {
         await using var c = await _db.OpenAsync();
         var ps = await LoadParticipantsAsync(c, companyId, roomId);
-        var existing = ps.Select(p => p.userId).ToHashSet();
         var added = new List<string>();
         foreach (var m in members)
         {
-            if (m.userId <= 0 || existing.Contains(m.userId)) continue;
+            if (m.userId <= 0) continue;
+            var ex = ps.FirstOrDefault(p => p.userId == m.userId);
+            if (ex != null)
+            {
+                // Re-adding someone who had LEFT → clear their left/hidden state so they rejoin as an
+                // active Member (a fresh joinedAt). Already-active members are skipped.
+                if (!string.IsNullOrEmpty(ex.leftAt) || !string.IsNullOrEmpty(ex.hiddenAt))
+                {
+                    ex.leftAt = null; ex.hiddenAt = null; ex.role = "Member"; ex.joinedAt = DateTime.UtcNow.ToString("o");
+                    added.Add(ex.userName ?? m.userName ?? "");
+                }
+                continue;
+            }
             ps.Add(new ChatParticipant { userId = m.userId, userName = m.userName, role = "Member", isMuted = false, joinedAt = DateTime.UtcNow.ToString("o") });
-            existing.Add(m.userId);
             added.Add(m.userName ?? "");
         }
         if (added.Count > 0) await SaveParticipantsAsync(c, companyId, roomId, ps);
@@ -419,9 +458,49 @@ public sealed class MessagingRepository
         var ps = await LoadParticipantsAsync(c, companyId, roomId);
         var target = ps.FirstOrDefault(p => p.userId == targetUserId);
         if (target == null) return null;
-        ps.RemoveAll(p => p.userId == targetUserId);
+
+        // Soft-leave (WhatsApp-style): mark them a PAST member instead of hard-removing — they keep the
+        // group read-only in their list (history up to now) and show under "Past members". Demote to Member.
+        target.leftAt = DateTime.UtcNow.ToString("o");
+        target.role = "Member";
+
+        // Safety net: a group must never be left with active members but NO active admin/owner (it would
+        // become unmanageable, and if "only admins can send" is on, no one could ever post). If the one
+        // who left was the last active admin, promote the earliest-joined remaining ACTIVE member.
+        static bool IsAdmin(string? r) => string.Equals(r, "Owner", StringComparison.OrdinalIgnoreCase)
+                                        || string.Equals(r, "Admin", StringComparison.OrdinalIgnoreCase);
+        var active = ps.Where(p => string.IsNullOrEmpty(p.leftAt)).ToList();
+        if (active.Count > 0 && !active.Any(p => IsAdmin(p.role)))
+            active.OrderBy(p => p.joinedAt ?? "").First().role = "Admin";
+
         await SaveParticipantsAsync(c, companyId, roomId, ps);
         return target.userName;
+    }
+
+    /// <summary>Set the caller's per-user chat prefs (mute / pin / archive) on their participant entry.
+    /// Only the passed (non-null) flags change. Per-user — never affects other members.</summary>
+    public async Task SetChatPrefsAsync(int companyId, long roomId, long userId, bool? mute, bool? pin, bool? archive)
+    {
+        await using var c = await _db.OpenAsync();
+        var ps = await LoadParticipantsAsync(c, companyId, roomId);
+        var me = ps.FirstOrDefault(p => p.userId == userId);
+        if (me == null) return;
+        if (mute.HasValue) me.isMuted = mute.Value;
+        if (pin.HasValue) me.isPinned = pin.Value;
+        if (archive.HasValue) me.archivedAt = archive.Value ? DateTime.UtcNow.ToString("o") : null;
+        await SaveParticipantsAsync(c, companyId, roomId, ps);
+    }
+
+    /// <summary>"Delete group for me": hide the room from ONE user's list (sets their hiddenAt). The
+    /// group + its messages stay for everyone else — nothing is deleted globally. Used after leaving.</summary>
+    public async Task DeleteForMeAsync(int companyId, long roomId, long userId)
+    {
+        await using var c = await _db.OpenAsync();
+        var ps = await LoadParticipantsAsync(c, companyId, roomId);
+        var me = ps.FirstOrDefault(p => p.userId == userId);
+        if (me == null) return;
+        me.hiddenAt = DateTime.UtcNow.ToString("o");
+        await SaveParticipantsAsync(c, companyId, roomId, ps);
     }
 
     /// <summary>Promote/demote a member ("Admin" or "Member").</summary>

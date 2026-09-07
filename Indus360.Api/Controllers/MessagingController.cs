@@ -27,7 +27,7 @@ public sealed class MessagingController : ControllerBase
         => _hub.Clients.Group(MessagingHub.ConvGroup(companyId, roomId)).SendAsync(ev, payload);
 
     /// <summary>Push a WhatsApp-style notification to every other room member (chat message received).</summary>
-    private async Task NotifyMessageRecipients(int companyId, long roomId, long senderId, ChatMessageDto msg)
+    private async Task NotifyMessageRecipients(int companyId, long roomId, long senderId, ChatMessageDto msg, List<long>? mentions = null)
     {
         var room = await _repo.GetRoomAsync(companyId, senderId, roomId);
         if (room == null) return;
@@ -44,9 +44,18 @@ public sealed class MessagingController : ControllerBase
         var link = $"/activity/messages?conv={roomId}";
         var icon = Initials(senderName);
 
+        var mentioned = new HashSet<long>(mentions ?? new());
         foreach (var p in participants)
         {
             if (p.userId == senderId) continue;
+            if (!string.IsNullOrEmpty(p.leftAt)) continue;    // left the group → no new-message notifications
+            if (mentioned.Contains(p.userId))
+            {
+                // @mentioned → always notify (even if they muted the chat), with a "mentioned you" title.
+                await _pusher.PushAsync(companyId, p.userId, "Message", $"{senderName} mentioned you · {room.Name ?? "Group"}", preview, link, roomId.ToString(), icon);
+                continue;
+            }
+            if (p.isMuted) continue;                          // muted this chat → no notification (unread still updates)
             await _pusher.PushAsync(companyId, p.userId, "Message", title, preview, link, roomId.ToString(), icon);
         }
     }
@@ -116,7 +125,7 @@ public sealed class MessagingController : ControllerBase
         if (msg != null)
         {
             await Broadcast(cid, roomId, "ReceiveMessage", new { roomId, message = msg });
-            await NotifyMessageRecipients(cid, roomId, uid.Value, msg);
+            await NotifyMessageRecipients(cid, roomId, uid.Value, msg, req.Mentions);
         }
         return Ok((object?)msg ?? new { });
     }
@@ -257,6 +266,34 @@ public sealed class MessagingController : ControllerBase
         return Ok(new { Message = "You left the group" });
     }
 
+    /// <summary>"Delete group for me" — removes the room from the caller's own list only (sets their
+    /// hiddenAt). The group + messages remain for everyone else; nothing is deleted globally. No
+    /// broadcast (other members are unaffected).</summary>
+    [HttpPost("conversations/{roomId:long}/delete-for-me")]
+    public async Task<IActionResult> DeleteRoomForMe(long roomId)
+    {
+        var uid = this.CurrentUserId(); if (uid is null) return BadRequest("Missing UserID header");
+        await _repo.DeleteForMeAsync(this.CurrentCompanyId(), roomId, uid.Value);
+        return Ok(new { Message = "Removed from your list" });
+    }
+
+    /// <summary>Set the caller's per-user chat prefs — mute / pin / archive. Per-user, no broadcast.</summary>
+    [HttpPost("conversations/{roomId:long}/prefs")]
+    public async Task<IActionResult> SetChatPrefs(long roomId, [FromBody] ChatPrefsRequest req)
+    {
+        var uid = this.CurrentUserId(); if (uid is null) return BadRequest("Missing UserID header");
+        await _repo.SetChatPrefsAsync(this.CurrentCompanyId(), roomId, uid.Value, req?.Mute, req?.Pin, req?.Archive);
+        return Ok(new { Message = "Preferences updated" });
+    }
+
+    /// <summary>All attachments + link messages shared in a room — the "Media, Docs &amp; Links" gallery.</summary>
+    [HttpGet("conversations/{roomId:long}/shared")]
+    public async Task<IActionResult> GetSharedMedia(long roomId)
+    {
+        var uid = this.CurrentUserId(); if (uid is null) return BadRequest("Missing UserID header");
+        return Ok(await _repo.GetSharedMediaAsync(this.CurrentCompanyId(), roomId, uid.Value));
+    }
+
     [HttpPost("conversations/{roomId:long}/settings")]
     public async Task<IActionResult> UpdateGroupSettings(long roomId, [FromBody] SetReadOnlyRequest req)
     {
@@ -340,7 +377,7 @@ public sealed class MessagingController : ControllerBase
     }
 
     // ── File upload / download (self-contained; no static middleware needed) ──
-    private string UploadDir => Path.Combine(_env.ContentRootPath, "chat-uploads");
+    private string UploadDir => Path.Combine(_env.UploadsRoot(), "chat-uploads");
 
     [HttpPost("upload")]
     [RequestSizeLimit(26_214_400)] // 25 MB

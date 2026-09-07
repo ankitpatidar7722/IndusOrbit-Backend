@@ -93,10 +93,10 @@ public sealed class ClientRepository
         DeriveMilestoneVariance(m);
         const string sql = @"INSERT INTO app.Milestones
             (ClientCode,MilestoneGroup,Name,TaskTimeline,PlannedDate,ActualDate,EndDate,ResPerson,Status,
-             StartDateVariance,ScheduledStartStatus,RemarkStartDelay,TimelineVariance,TimelineVarianceStatus,RemarkDuration,SortOrder,Emailed,Tasked,CreatedBy)
+             StartDateVariance,ScheduledStartStatus,RemarkStartDelay,TimelineVariance,TimelineVarianceStatus,RemarkDuration,SortOrder,Emailed,Tasked,Summary,CreatedBy)
             OUTPUT INSERTED.Id VALUES
             (@ClientCode,@MilestoneGroup,@Name,@TaskTimeline,@PlannedDate,@ActualDate,@EndDate,@ResPerson,@Status,
-             @StartDateVariance,@ScheduledStartStatus,@RemarkStartDelay,@TimelineVariance,@TimelineVarianceStatus,@RemarkDuration,@SortOrder,@Emailed,@Tasked,@CreatedBy);";
+             @StartDateVariance,@ScheduledStartStatus,@RemarkStartDelay,@TimelineVariance,@TimelineVarianceStatus,@RemarkDuration,@SortOrder,@Emailed,@Tasked,@Summary,@CreatedBy);";
         await using var db = await _db.OpenAsync();
         return await db.ExecuteScalarAsync<int>(sql, m);
     }
@@ -288,7 +288,7 @@ public sealed class ClientRepository
         const string sql = @"UPDATE app.Milestones SET MilestoneGroup=@MilestoneGroup,Name=@Name,TaskTimeline=@TaskTimeline,PlannedDate=@PlannedDate,
             ActualDate=@ActualDate,EndDate=@EndDate,ResPerson=@ResPerson,Status=@Status,StartDateVariance=@StartDateVariance,
             ScheduledStartStatus=@ScheduledStartStatus,RemarkStartDelay=@RemarkStartDelay,TimelineVariance=@TimelineVariance,
-            TimelineVarianceStatus=@TimelineVarianceStatus,RemarkDuration=@RemarkDuration,Emailed=@Emailed,Tasked=@Tasked,ModifiedBy=@ModifiedBy,ModifiedDate=SYSDATETIME() WHERE Id=@Id;";
+            TimelineVarianceStatus=@TimelineVarianceStatus,RemarkDuration=@RemarkDuration,Emailed=@Emailed,Tasked=@Tasked,Summary=@Summary,ModifiedBy=@ModifiedBy,ModifiedDate=SYSDATETIME() WHERE Id=@Id;";
         var ok = await db.ExecuteAsync(sql, m) > 0;
 
         // When the Order Date's Estimated Start is set/changed, re-cascade every LATER phase's Estimated
@@ -307,15 +307,15 @@ public sealed class ClientRepository
     // ---------------- Training ----------------
     public async Task<int> AddTrainingAsync(TrainingUpdate t)
     {
-        const string sql = @"INSERT INTO app.TrainingUpdates (ClientCode,ModuleName,SubModule,TimelineDays,LogDate,StartTime,EndTime,Trainee,Trainer,Status,Details,Remark,VideoUrl,Emailed,Tasked,CreatedBy)
-            OUTPUT INSERTED.Id VALUES (@ClientCode,@ModuleName,@SubModule,@TimelineDays,@LogDate,@StartTime,@EndTime,@Trainee,@Trainer,@Status,@Details,@Remark,@VideoUrl,@Emailed,@Tasked,@CreatedBy);";
+        const string sql = @"INSERT INTO app.TrainingUpdates (ClientCode,ModuleName,SubModule,TimelineDays,LogDate,StartTime,EndTime,Trainee,Trainer,Status,Details,Remark,VideoUrl,Emailed,Tasked,Summary,CreatedBy)
+            OUTPUT INSERTED.Id VALUES (@ClientCode,@ModuleName,@SubModule,@TimelineDays,@LogDate,@StartTime,@EndTime,@Trainee,@Trainer,@Status,@Details,@Remark,@VideoUrl,@Emailed,@Tasked,@Summary,@CreatedBy);";
         await using var db = await _db.OpenAsync();
         return await db.ExecuteScalarAsync<int>(sql, t);
     }
     public async Task<bool> UpdateTrainingAsync(TrainingUpdate t)
     {
         const string sql = @"UPDATE app.TrainingUpdates SET ModuleName=@ModuleName,SubModule=@SubModule,TimelineDays=@TimelineDays,LogDate=@LogDate,StartTime=@StartTime,EndTime=@EndTime,
-            Trainee=@Trainee,Trainer=@Trainer,Status=@Status,Details=@Details,Remark=@Remark,VideoUrl=@VideoUrl,Emailed=@Emailed,Tasked=@Tasked,ModifiedBy=@ModifiedBy,ModifiedDate=SYSDATETIME() WHERE Id=@Id;";
+            Trainee=@Trainee,Trainer=@Trainer,Status=@Status,Details=@Details,Remark=@Remark,VideoUrl=@VideoUrl,Emailed=@Emailed,Tasked=@Tasked,Summary=@Summary,ModifiedBy=@ModifiedBy,ModifiedDate=SYSDATETIME() WHERE Id=@Id;";
         await using var db = await _db.OpenAsync();
         return await db.ExecuteAsync(sql, t) > 0;
     }
@@ -324,15 +324,15 @@ public sealed class ClientRepository
     // ---------------- Change Requests ----------------
     public async Task<int> AddChangeRequestAsync(ChangeRequest x)
     {
-        const string sql = @"INSERT INTO app.ChangeRequests (ClientCode,ModuleName,SubModule,Description,RaisedBy,RaisedDate,ReportedBy,QueryType,Status,CompletionDate,CompletionDays,Remark,InBugTool,Emailed,Tasked,Pointed,CreatedBy)
-            OUTPUT INSERTED.Id VALUES (@ClientCode,@ModuleName,@SubModule,@Description,@RaisedBy,@RaisedDate,@ReportedBy,@QueryType,@Status,@CompletionDate,@CompletionDays,@Remark,@InBugTool,@Emailed,@Tasked,@Pointed,@CreatedBy);";
+        const string sql = @"INSERT INTO app.ChangeRequests (ClientCode,ModuleName,SubModule,Description,RaisedBy,RaisedDate,ReportedBy,QueryType,Status,CompletionDate,CompletionDays,Remark,InBugTool,Emailed,Tasked,Pointed,Summary,CreatedBy)
+            OUTPUT INSERTED.Id VALUES (@ClientCode,@ModuleName,@SubModule,@Description,@RaisedBy,@RaisedDate,@ReportedBy,@QueryType,@Status,@CompletionDate,@CompletionDays,@Remark,@InBugTool,@Emailed,@Tasked,@Pointed,@Summary,@CreatedBy);";
         await using var db = await _db.OpenAsync();
         return await db.ExecuteScalarAsync<int>(sql, x);
     }
     public async Task<bool> UpdateChangeRequestAsync(ChangeRequest x)
     {
         const string sql = @"UPDATE app.ChangeRequests SET ModuleName=@ModuleName,SubModule=@SubModule,Description=@Description,RaisedBy=@RaisedBy,RaisedDate=@RaisedDate,ReportedBy=@ReportedBy,
-            QueryType=@QueryType,Status=@Status,CompletionDate=@CompletionDate,CompletionDays=@CompletionDays,Remark=@Remark,InBugTool=@InBugTool,Emailed=@Emailed,Tasked=@Tasked,Pointed=@Pointed,ModifiedBy=@ModifiedBy,ModifiedDate=SYSDATETIME() WHERE Id=@Id;";
+            QueryType=@QueryType,Status=@Status,CompletionDate=@CompletionDate,CompletionDays=@CompletionDays,Remark=@Remark,InBugTool=@InBugTool,Emailed=@Emailed,Tasked=@Tasked,Pointed=@Pointed,Summary=@Summary,ModifiedBy=@ModifiedBy,ModifiedDate=SYSDATETIME() WHERE Id=@Id;";
         await using var db = await _db.OpenAsync();
         return await db.ExecuteAsync(sql, x) > 0;
     }
