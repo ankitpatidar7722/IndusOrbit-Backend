@@ -1,3 +1,4 @@
+using Indus360.Api.Repositories;
 using Indus360.Api.Services;
 using Microsoft.AspNetCore.Mvc;
 
@@ -15,7 +16,8 @@ namespace Indus360.Api.Controllers;
 public sealed class MasterTemplatesController : ControllerBase
 {
     private readonly IWebHostEnvironment _env;
-    public MasterTemplatesController(IWebHostEnvironment env) => _env = env;
+    private readonly TemplateStatusRepository _status;
+    public MasterTemplatesController(IWebHostEnvironment env, TemplateStatusRepository status) { _env = env; _status = status; }
 
     private static readonly string[] AllowedExt = { ".xlsx", ".xls", ".csv" };
     private const string TrashDir = "_deleted";
@@ -127,6 +129,34 @@ public sealed class MasterTemplatesController : ControllerBase
             .OrderBy(x => x.group).ThenBy(x => x.file.Name)
             .Select(x => new { group = x.group, name = x.file.Name, size = x.file.Length, modifiedAt = x.file.LastWriteTime });
         return Ok(new { success = true, data });
+    }
+
+    // ---- "Sent to Client" status (recorded per client when templates are emailed) ----
+    public sealed class MarkSentRequest
+    {
+        public string? ClientCode { get; set; }
+        public int? SentBy { get; set; }
+        public List<TemplateRef> Items { get; set; } = new();
+        public sealed class TemplateRef { public string? Group { get; set; } public string? Name { get; set; } }
+    }
+
+    /// <summary>The templates already emailed to a client (group + name + when + by whom).</summary>
+    [HttpGet("status")]
+    public async Task<IActionResult> Status([FromQuery] string? clientCode)
+    {
+        if (string.IsNullOrWhiteSpace(clientCode)) return Ok(new { success = true, data = Array.Empty<object>() });
+        var rows = await _status.GetForClientAsync(clientCode);
+        return Ok(new { success = true, data = rows.Select(r => new { group = r.TemplateGroup, name = r.TemplateName, sentAt = r.SentAt, sentBy = r.SentByName }) });
+    }
+
+    /// <summary>Record that the given templates were emailed to a client (called after a successful send).</summary>
+    [HttpPost("status")]
+    public async Task<IActionResult> MarkSent([FromBody] MarkSentRequest req)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.ClientCode) || req.Items.Count == 0)
+            return BadRequest(new { success = false, message = "clientCode and items are required." });
+        await _status.MarkSentAsync(req.ClientCode!, req.SentBy, req.Items.Select(i => (i.Group ?? "", i.Name ?? "")));
+        return Ok(new { success = true });
     }
 
     /// <summary>Download one template file.</summary>

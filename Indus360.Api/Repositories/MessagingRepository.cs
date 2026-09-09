@@ -23,12 +23,15 @@ public sealed class MessagingRepository
         m.ReplyDepth, m.CreatedAt, m.EditedAt, m.IsEdited, m.IsDeleted, m.Reactions, m.Attachments,
         ISNULL(m.IsPinned,0) AS IsPinned, m.PinnedBy,
         u.FullName AS UserName,
-        ReplyCount = (SELECT COUNT(*) FROM app.ChatMessages cr WHERE cr.ParentMessageID = m.MessageID AND cr.IsDeleted = 0)";
+        ReplyCount = (SELECT COUNT(*) FROM app.ChatMessages cr WHERE cr.ParentMessageID = m.MessageID AND cr.IsDeleted = 0),
+        ParentSenderName = (SELECT pu.FullName FROM app.ChatMessages pm JOIN app.Users pu ON pu.UserID = pm.UserID WHERE pm.MessageID = m.ParentMessageID),
+        ParentContent    = (SELECT pm.Content     FROM app.ChatMessages pm WHERE pm.MessageID = m.ParentMessageID),
+        ParentAttachments= (SELECT pm.Attachments FROM app.ChatMessages pm WHERE pm.MessageID = m.ParentMessageID)";
 
     // Correlated unread count for a room, relative to the user's lastReadMessageId in Participants.
     private const string UnreadExpr = @"
         (SELECT COUNT(*) FROM app.ChatMessages um
-         WHERE um.RoomID = r.RoomID AND um.IsDeleted = 0 AND um.ParentMessageID IS NULL AND um.UserID <> @UserID
+         WHERE um.RoomID = r.RoomID AND um.IsDeleted = 0 AND um.UserID <> @UserID
            AND um.MessageID > ISNULL((SELECT TRY_CONVERT(BIGINT, JSON_VALUE(p.value,'$.lastReadMessageId'))
                                       FROM OPENJSON(ISNULL(r.Participants,'[]')) p
                                       WHERE JSON_VALUE(p.value,'$.userId') = CAST(@UserID AS NVARCHAR(20))), 0))";
@@ -153,7 +156,8 @@ public sealed class MessagingRepository
             FROM app.ChatMessages m
             LEFT JOIN app.Users u ON u.UserId = m.UserID
             LEFT JOIN app.ChatMessageStars st ON st.MessageID = m.MessageID AND st.UserID = @UserID
-            WHERE m.CompanyID = @CompanyID AND m.RoomID = @RoomID AND m.ParentMessageID IS NULL
+            WHERE m.CompanyID = @CompanyID AND m.RoomID = @RoomID
+              -- replies show INLINE (WhatsApp-style, with a quote of the parent) — not filtered into a separate thread
               AND (@LeftAt IS NULL OR m.CreatedAt <= @LeftAt)
               AND NOT EXISTS (SELECT 1 FROM app.ChatMessageHidden h WHERE h.MessageID = m.MessageID AND h.UserID = @UserID)
             ORDER BY m.CreatedAt DESC

@@ -27,7 +27,8 @@ public sealed class UserAdminRepository
             SELECT u.UserId, u.FullName, u.Email, u.Role, u.ReportingManagerId, u.IsActive, u.CompanyId,
                    mgr.FullName AS ReportingManagerName,
                    {MobileSub} AS Mobile,
-                   {CodeSub}   AS EmployeeCode
+                   {CodeSub}   AS EmployeeCode,
+                   u.DateOfBirth AS DateOfBirth
             FROM app.Users u
             LEFT JOIN app.Users mgr ON mgr.UserId = u.ReportingManagerId
             WHERE ISNULL(u.IsDeletedTransaction,0) = 0

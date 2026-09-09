@@ -91,12 +91,15 @@ public sealed class ModulesRepository
     // ── save module settings (diff apply to client DB) ───────────
     public async Task<(int inserted, int deleted)> SaveModuleSettingsAsync(SaveModuleSettingsRequest req)
     {
-        var table = MasterTable(req.ApplicationName);
+        // Enabling a module copies its full row from the shared Keyline enterprise catalog
+        // (IndusEnterpriseKeyline.dbo.ModuleMaster) — the single source of truth — NOT the per-app master.
+        // The grid still lists the per-app catalog; a handful of app-only modules that don't exist in
+        // Keyline simply have no row to copy (enabling them is a no-op).
         var masterLookup = new Dictionary<string, IDictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
-        using (var c = Control())
+        using (var c = Keyline())
         {
             await c.OpenAsync();
-            foreach (var row in await c.QueryAsync($"SELECT * FROM [{table}]"))
+            foreach (var row in await c.QueryAsync("SELECT * FROM dbo.ModuleMaster WHERE ISNULL(IsDeletedTransaction,0)=0"))
             {
                 var dict = (IDictionary<string, object>)row;
                 var name = dict.TryGetValue("ModuleName", out var mn) ? mn?.ToString() : null;
@@ -107,6 +110,11 @@ public sealed class ModulesRepository
         int inserted = 0, deleted = 0;
         await using var cc = Client(req.ConnectionString);
         await cc.OpenAsync();
+        // Keyline has a few columns older client DBs don't (e.g. ReactRoutePath) — copy only the columns
+        // that actually exist in THIS client's ModuleMaster, else the INSERT would fail.
+        var clientCols = new HashSet<string>(
+            await cc.QueryAsync<string>("SELECT name FROM sys.columns WHERE object_id = OBJECT_ID('ModuleMaster')"),
+            StringComparer.OrdinalIgnoreCase);
         var adminUserId = await cc.ExecuteScalarAsync<int?>("SELECT TOP 1 UserID FROM UserMaster WHERE UserName='admin'");
         var companyId = await cc.ExecuteScalarAsync<int?>("SELECT TOP 1 CompanyID FROM CompanyMaster WHERE IsDeletedTransaction=0") ?? 2;
         var existing = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -119,7 +127,9 @@ public sealed class ModulesRepository
             {
                 if (existing.TryGetValue(mod.ModuleName, out var d) && d == 1)
                 {
+                    // restore a soft-deleted module: un-delete the module + its (previously soft-deleted) authority
                     await cc.ExecuteAsync("UPDATE ModuleMaster SET IsDeletedTransaction=0 WHERE ModuleName=@n", new { n = mod.ModuleName });
+                    await cc.ExecuteAsync("UPDATE UserModuleAuthentication SET IsDeletedTransaction=0 WHERE ModuleName=@n", new { n = mod.ModuleName });
                     if (adminUserId.HasValue)
                     {
                         var mid = await cc.ExecuteScalarAsync<int?>("SELECT ModuleID FROM ModuleMaster WHERE ModuleName=@n", new { n = mod.ModuleName });
@@ -132,7 +142,19 @@ public sealed class ModulesRepository
                 }
                 else if (!existing.ContainsKey(mod.ModuleName) && masterLookup.TryGetValue(mod.ModuleName, out var mrow))
                 {
-                    var newId = await InsertDynamicAsync(cc, "ModuleMaster", mrow, exclude: new[] { "ModuleID" });
+                    // SetGroupIndex must stay consistent PER HEAD in the DESTINATION client — do NOT copy Keyline's value.
+                    // If this module's ModuleHeadName already exists in the client → reuse that head's SetGroupIndex.
+                    // If the head is brand-new to the client → start a new group at (client's MAX SetGroupIndex) + 1.
+                    var headName = mrow.TryGetValue("ModuleHeadName", out var hn) ? hn?.ToString() : null;
+                    double? headSgi = string.IsNullOrWhiteSpace(headName) ? null
+                        : await cc.ExecuteScalarAsync<double?>(
+                            "SELECT MIN(SetGroupIndex) FROM ModuleMaster WHERE ModuleHeadName = @h", new { h = headName });
+                    var sgi = headSgi ?? await cc.ExecuteScalarAsync<double?>(
+                        "SELECT ISNULL(MAX(SetGroupIndex), 0) + 1 FROM ModuleMaster") ?? 1;
+
+                    // copy the Keyline row but override SetGroupIndex with the destination-computed value
+                    var toInsert = new Dictionary<string, object>(mrow, StringComparer.OrdinalIgnoreCase) { ["SetGroupIndex"] = sgi };
+                    var newId = await InsertDynamicAsync(cc, "ModuleMaster", toInsert, exclude: new[] { "ModuleID" }, onlyColumns: clientCols);
                     if (adminUserId.HasValue)
                         await cc.ExecuteAsync($"INSERT INTO UserModuleAuthentication ({AuthCols}) VALUES ({AuthVals})",
                             new { UserID = adminUserId.Value, ModuleID = newId, ModuleName = mod.ModuleName, CompanyID = companyId });
@@ -141,10 +163,9 @@ public sealed class ModulesRepository
             }
             else if (existing.TryGetValue(mod.ModuleName, out var d) && d == 0)
             {
-                var mid = await cc.ExecuteScalarAsync<int?>("SELECT ModuleID FROM ModuleMaster WHERE ModuleName=@n", new { n = mod.ModuleName });
-                if (mid.HasValue)
-                    await cc.ExecuteAsync("DELETE FROM UserModuleAuthentication WHERE ModuleID=@id AND ModuleName=@n", new { id = mid.Value, n = mod.ModuleName });
-                await cc.ExecuteAsync("DELETE FROM ModuleMaster WHERE ModuleName=@n", new { n = mod.ModuleName });
+                // SOFT delete (never hard delete) — mark the module + its authority as deleted so re-enabling restores it.
+                await cc.ExecuteAsync("UPDATE ModuleMaster SET IsDeletedTransaction=1 WHERE ModuleName=@n", new { n = mod.ModuleName });
+                await cc.ExecuteAsync("UPDATE UserModuleAuthentication SET IsDeletedTransaction=1 WHERE ModuleName=@n", new { n = mod.ModuleName });
                 deleted++;
             }
         }
@@ -523,10 +544,12 @@ public sealed class ModulesRepository
     }
 
     // ── dynamic insert helpers ───────────────────────────────────
-    private static async Task<int> InsertDynamicAsync(SqlConnection cc, string tableInto, IDictionary<string, object> row, IEnumerable<string> exclude, IDbTransaction? tx = null)
+    private static async Task<int> InsertDynamicAsync(SqlConnection cc, string tableInto, IDictionary<string, object> row, IEnumerable<string> exclude, IDbTransaction? tx = null, IReadOnlySet<string>? onlyColumns = null)
     {
         var ex = new HashSet<string>(exclude, StringComparer.OrdinalIgnoreCase);
-        var cols = row.Keys.Where(k => !ex.Contains(k)).ToList();
+        // onlyColumns (when given) restricts the insert to columns that exist in the target table — used when
+        // the source row (e.g. Keyline) has extra columns the target ModuleMaster doesn't.
+        var cols = row.Keys.Where(k => !ex.Contains(k) && (onlyColumns is null || onlyColumns.Contains(k))).ToList();
         var colList = string.Join(", ", cols.Select(c => $"[{c}]"));
         var parList = string.Join(", ", cols.Select(c => $"@{c}"));
         var dp = new DynamicParameters();

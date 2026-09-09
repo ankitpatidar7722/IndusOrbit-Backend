@@ -15,6 +15,7 @@ public sealed class UserListRow
     public bool IsActive { get; set; }
     public int CompanyId { get; set; }
     public string? EmployeeCode { get; set; }
+    public DateTime? DateOfBirth { get; set; }   // used to auto-calc Age on the Onsite visit form
 }
 
 /// <summary>Full user for the edit form (no password returned).</summary>

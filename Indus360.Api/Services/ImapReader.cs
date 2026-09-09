@@ -4,6 +4,8 @@ using MailKit.Search;
 using MailKit.Security;
 using MimeKit;
 using System.IO;
+using System.Collections.Concurrent;
+using System.Net.Sockets;
 using Indus360.Api.Models;
 
 namespace Indus360.Api.Services;
@@ -11,8 +13,13 @@ namespace Indus360.Api.Services;
 /// <summary>
 /// Per-user IMAP mailbox access (MailKit). Credentials come from the acting user's own
 /// SMTP config (app.Users) via EmailRepository.GetSmtpConfigAsync; the IMAP host is derived
-/// from the SMTP host (smtp.gmail.com → imap.gmail.com, etc.). One short-lived connection
-/// per call — no pooling (Phase 1). Requires IMAP enabled + an App Password on the account.
+/// from the SMTP host (smtp.gmail.com → imap.gmail.com, etc.).
+///
+/// Connections are POOLED and reused per user (keyed by user@host) so a tab click no longer
+/// pays a fresh TCP+TLS+AUTHENTICATE round-trip every time — that handshake was the main reason
+/// folders felt slow to open. Each pooled client is serialised by its own gate (MailKit clients
+/// are not thread-safe); idle connections are evicted after 10 minutes. Requires IMAP enabled +
+/// an App Password on the account.
 /// </summary>
 public sealed class ImapReader
 {
@@ -26,13 +33,72 @@ public sealed class ImapReader
         return string.IsNullOrWhiteSpace(s) ? ("imap.gmail.com", 993) : (s, 993);
     }
 
-    private static async Task<ImapClient> ConnectAsync(SmtpConfig cfg)
+    // ---------------- connection pool ----------------
+    private sealed class PooledImap
+    {
+        public ImapClient Client = new() { Timeout = 60000 };
+        public readonly SemaphoreSlim Gate = new(1, 1);
+        public DateTime LastUsedUtc = DateTime.UtcNow;
+    }
+
+    private static readonly ConcurrentDictionary<string, PooledImap> _pool = new();
+    private static readonly TimeSpan IdleTtl = TimeSpan.FromMinutes(10);
+
+    private static bool IsConnectionError(Exception ex) =>
+        ex is ServiceNotConnectedException or ServiceNotAuthenticatedException
+           or ImapProtocolException or ImapCommandException
+           or IOException or SocketException;
+
+    private static void EvictIdle()
+    {
+        var cutoff = DateTime.UtcNow - IdleTtl;
+        foreach (var kv in _pool)
+        {
+            if (kv.Value.LastUsedUtc < cutoff && kv.Value.Gate.CurrentCount == 1 && _pool.TryRemove(kv.Key, out var old))
+            {
+                try { old.Client.Dispose(); } catch { /* ignore */ }
+            }
+        }
+    }
+
+    /// <summary>Run <paramref name="op"/> on a live, authenticated client for this user, reusing a
+    /// pooled connection. Reconnects transparently and retries once if the pooled socket went stale.</summary>
+    private static async Task<T> WithClientAsync<T>(SmtpConfig cfg, Func<ImapClient, Task<T>> op)
     {
         var (host, port) = ImapHost(cfg.Server);
-        var client = new ImapClient { Timeout = 60000 };
-        await client.ConnectAsync(host, port, SecureSocketOptions.SslOnConnect);
-        await client.AuthenticateAsync(cfg.User, cfg.Pass);
-        return client;
+        var key = (cfg.User ?? "") + "@" + host;
+        EvictIdle();
+        var p = _pool.GetOrAdd(key, _ => new PooledImap());
+
+        await p.Gate.WaitAsync();
+        try
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    if (!p.Client.IsConnected)
+                    {
+                        try { p.Client.Dispose(); } catch { /* ignore */ }
+                        p.Client = new ImapClient { Timeout = 60000 };
+                        await p.Client.ConnectAsync(host, port, SecureSocketOptions.SslOnConnect);
+                    }
+                    if (!p.Client.IsAuthenticated)
+                        await p.Client.AuthenticateAsync(cfg.User, cfg.Pass);
+
+                    var result = await op(p.Client);
+                    p.LastUsedUtc = DateTime.UtcNow;
+                    return result;
+                }
+                catch (Exception ex) when (attempt == 0 && IsConnectionError(ex))
+                {
+                    // Pooled socket was dropped by the server — throw it away and reconnect once.
+                    try { p.Client.Dispose(); } catch { /* ignore */ }
+                    p.Client = new ImapClient { Timeout = 60000 };
+                }
+            }
+        }
+        finally { p.Gate.Release(); }
     }
 
     // Map a logical folder name to the account's actual (special-use) IMAP folder.
@@ -68,16 +134,18 @@ public sealed class ImapReader
         page = Math.Max(1, page);
         limit = Math.Clamp(limit, 1, 100);
         bool starredOnly = string.Equals(folderName, "starred", StringComparison.OrdinalIgnoreCase);
+        // The unread badge only matters for the Inbox (+ Starred, which lives in INBOX). Skipping the
+        // full-folder NotSeen search on Sent/Trash/Archive avoids scanning huge folders on every open.
+        bool wantUnread = starredOnly || string.Equals(folderName, "inbox", StringComparison.OrdinalIgnoreCase);
 
-        using var client = await ConnectAsync(cfg);
-        try
+        return await WithClientAsync(cfg, async client =>
         {
             var folder = Resolve(client, folderName);
             await folder.OpenAsync(FolderAccess.ReadOnly);
 
             int total = folder.Count;
-            int unread;
-            try { unread = (await folder.SearchAsync(SearchQuery.NotSeen)).Count; } catch { unread = 0; }
+            int unread = 0;
+            if (wantUnread) { try { unread = (await folder.SearchAsync(SearchQuery.NotSeen)).Count; } catch { unread = 0; } }
 
             var result = new EmailListResult
             {
@@ -101,8 +169,7 @@ public sealed class ImapReader
             if (starredOnly) list = list.Where(e => e.IsStarred).ToList();
             result.Emails = list;
             return result;
-        }
-        finally { try { await client.DisconnectAsync(true); } catch { /* ignore */ } }
+        });
     }
 
     private static EmailMessageDto Map(IMessageSummary s, string folderName)
@@ -127,8 +194,7 @@ public sealed class ImapReader
     /// <summary>Full message (html + text body + attachment metadata).</summary>
     public async Task<EmailMessageDto?> GetAsync(SmtpConfig cfg, string folderName, uint uid)
     {
-        using var client = await ConnectAsync(cfg);
-        try
+        return await WithClientAsync(cfg, async client =>
         {
             var folder = Resolve(client, folderName);
             await folder.OpenAsync(FolderAccess.ReadOnly);
@@ -145,7 +211,7 @@ public sealed class ImapReader
                 Size = 0,
             }).ToList();
 
-            return new EmailMessageDto
+            return (EmailMessageDto?)new EmailMessageDto
             {
                 Id = uid.ToString(),
                 Folder = (folderName ?? "inbox").ToLowerInvariant(),
@@ -161,15 +227,13 @@ public sealed class ImapReader
                 HasAttachments = atts.Count > 0,
                 Attachments = atts,
             };
-        }
-        finally { try { await client.DisconnectAsync(true); } catch { /* ignore */ } }
+        });
     }
 
     /// <summary>Set/clear the Seen (read) and/or Flagged (star) flags.</summary>
     public async Task SetFlagsAsync(SmtpConfig cfg, string folderName, uint uid, bool? isRead, bool? isStarred)
     {
-        using var client = await ConnectAsync(cfg);
-        try
+        await WithClientAsync(cfg, async client =>
         {
             var folder = Resolve(client, folderName);
             await folder.OpenAsync(FolderAccess.ReadWrite);
@@ -184,41 +248,53 @@ public sealed class ImapReader
                 if (isStarred.Value) await folder.AddFlagsAsync(u, MessageFlags.Flagged, true);
                 else await folder.RemoveFlagsAsync(u, MessageFlags.Flagged, true);
             }
-        }
-        finally { try { await client.DisconnectAsync(true); } catch { /* ignore */ } }
+            return true;
+        });
     }
 
     /// <summary>Move a message to a special-use folder (Archive = All Mail, Trash = delete).</summary>
     public async Task MoveAsync(SmtpConfig cfg, string folderName, uint uid, SpecialFolder dest)
     {
-        using var client = await ConnectAsync(cfg);
-        try
+        await WithClientAsync(cfg, async client =>
         {
             var src = Resolve(client, folderName);
             await src.OpenAsync(FolderAccess.ReadWrite);
             var destFolder = TryGet(client, dest);
             if (destFolder != null) await src.MoveToAsync(new UniqueId(uid), destFolder);
-        }
-        finally { try { await client.DisconnectAsync(true); } catch { /* ignore */ } }
+            return true;
+        });
+    }
+
+    /// <summary>Permanently delete a message from a folder (mark \Deleted + EXPUNGE). Used to
+    /// "Delete forever" from Trash — after this the mail is gone from the server, not recoverable.</summary>
+    public async Task DeleteForeverAsync(SmtpConfig cfg, string folderName, uint uid)
+    {
+        await WithClientAsync(cfg, async client =>
+        {
+            var folder = Resolve(client, folderName);
+            await folder.OpenAsync(FolderAccess.ReadWrite);
+            var u = new UniqueId(uid);
+            await folder.AddFlagsAsync(u, MessageFlags.Deleted, true);
+            await folder.ExpungeAsync(new[] { u });
+            return true;
+        });
     }
 
     /// <summary>Download one attachment (by its 0-based index among the message's file attachments).</summary>
     public async Task<(byte[] bytes, string filename, string contentType)?> DownloadAttachmentAsync(SmtpConfig cfg, string folderName, uint uid, int index)
     {
-        using var client = await ConnectAsync(cfg);
-        try
+        return await WithClientAsync(cfg, async client =>
         {
             var folder = Resolve(client, folderName);
             await folder.OpenAsync(FolderAccess.ReadOnly);
             var msg = await folder.GetMessageAsync(new UniqueId(uid));
             var parts = msg.Attachments.OfType<MimePart>().ToList();
-            if (index < 0 || index >= parts.Count) return null;
+            if (index < 0 || index >= parts.Count) return ((byte[], string, string)?)null;
             var part = parts[index];
             if (part.Content == null) return null;
             using var ms = new MemoryStream();
             await part.Content.DecodeToAsync(ms);
             return (ms.ToArray(), part.FileName ?? ("attachment-" + index), part.ContentType?.MimeType ?? "application/octet-stream");
-        }
-        finally { try { await client.DisconnectAsync(true); } catch { /* ignore */ } }
+        });
     }
 }

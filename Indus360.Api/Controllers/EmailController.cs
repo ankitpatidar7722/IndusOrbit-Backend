@@ -248,6 +248,21 @@ public sealed class EmailController : ControllerBase
         catch (Exception ex) { return Ok(new { success = false, error = Friendly(ex) }); }
     }
 
+    /// <summary>Permanently delete a message (expunge). Used from the Trash folder — not recoverable.</summary>
+    [HttpDelete("messages/{uid}/permanent")]
+    public async Task<IActionResult> DeleteMessagePermanent(string uid, [FromQuery] string? email, [FromQuery] string folder = "trash")
+    {
+        if (!uint.TryParse(uid, out var id)) return BadRequest(new { success = false, error = "Invalid message id." });
+        var cfg = await _repo.GetSmtpConfigAsync(email, perUserOnly: true);
+        if (!cfg.IsConfigured) return Ok(new { success = false, error = "Email not configured." });
+        try
+        {
+            await _imap.DeleteForeverAsync(cfg, folder, id);
+            return Ok(new { success = true });
+        }
+        catch (Exception ex) { return Ok(new { success = false, error = Friendly(ex) }); }
+    }
+
     /// <summary>Download an attachment (0-based index among the message's file attachments).</summary>
     [HttpGet("messages/{uid}/attachments/{index}")]
     public async Task<IActionResult> Attachment(string uid, int index, [FromQuery] string? email, [FromQuery] string folder = "inbox")

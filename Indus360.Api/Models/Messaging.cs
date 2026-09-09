@@ -39,6 +39,10 @@ public sealed class ChatMessageDto
     [JsonPropertyName("ParentMessageID")] public long? ParentMessageID { get; set; }
     [JsonPropertyName("ReplyDepth")] public int ReplyDepth { get; set; }
     [JsonPropertyName("ReplyCount")] public int ReplyCount { get; set; }
+    // The message this one is replying to (for the WhatsApp-style quote shown inside a reply bubble).
+    [JsonPropertyName("ParentSenderName")] public string? ParentSenderName { get; set; }
+    [JsonPropertyName("ParentContent")] public string? ParentContent { get; set; }
+    [JsonPropertyName("ParentAttachments")] public string? ParentAttachments { get; set; }
     [JsonPropertyName("CreatedAt")] public DateTime CreatedAt { get; set; }
     [JsonPropertyName("EditedAt")] public DateTime? EditedAt { get; set; }
     [JsonPropertyName("IsEdited")] public bool IsEdited { get; set; }

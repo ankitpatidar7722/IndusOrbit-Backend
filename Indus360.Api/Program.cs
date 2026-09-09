@@ -46,6 +46,7 @@ builder.Services.AddScoped<TicketRepository>();
 builder.Services.AddScoped<TmsReportRepository>();
 builder.Services.AddScoped<TmsAdminRepository>();
 builder.Services.AddScoped<NotificationRepository>();
+builder.Services.AddScoped<TemplateStatusRepository>();
 builder.Services.AddScoped<AttachmentRepository>();
 // Client Kick-Off / Sign-Off finalized documents (save / view / download)
 builder.Services.AddScoped<ClientDocumentRepository>();
