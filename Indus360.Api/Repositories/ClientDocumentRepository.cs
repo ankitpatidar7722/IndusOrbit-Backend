@@ -132,9 +132,15 @@ public sealed class ClientDocumentRepository
             new { clientCode, docType, action, version, actorUserId, actorName, recipient });
     }
 
+    // Once the history table is confirmed to exist we skip the check on every subsequent call —
+    // over a WAN link to the server DB that IF-OBJECT_ID round-trip added noticeable latency to
+    // every document Save. (Process-lifetime cache; a fresh deploy re-checks once.)
+    private static volatile bool _historyTableReady;
+
     /// <summary>Create the audit-log table on first use (idempotent) — no separate migration needed.</summary>
     private static async Task EnsureHistoryTableAsync(IDbConnection db)
     {
+        if (_historyTableReady) return;
         await db.ExecuteAsync(@"
             IF OBJECT_ID('app.ClientDocumentHistory') IS NULL
             CREATE TABLE app.ClientDocumentHistory (
@@ -148,5 +154,6 @@ public sealed class ClientDocumentRepository
                 Recipient   NVARCHAR(400) NULL,
                 CreatedAt   DATETIME2     NOT NULL CONSTRAINT DF_ClientDocumentHistory_CreatedAt DEFAULT SYSDATETIME()
             );");
+        _historyTableReady = true;
     }
 }

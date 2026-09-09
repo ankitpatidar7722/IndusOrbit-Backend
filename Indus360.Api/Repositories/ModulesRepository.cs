@@ -17,11 +17,15 @@ public sealed class ModulesRepository
 {
     private readonly string _controlCs;
     private readonly string _localCs;
+    private readonly string _keylineCs;
     public ModulesRepository(IConfiguration cfg)
     {
         // IndusControl is a flat, mode-independent connection string.
         _controlCs = cfg.GetConnectionString("IndusControl")
            ?? throw new InvalidOperationException("ConnectionStrings:IndusControl not configured.");
+        // IndusKeyline is the shared enterprise module catalog (also flat / mode-independent).
+        _keylineCs = cfg.GetConnectionString("IndusKeyline")
+           ?? throw new InvalidOperationException("ConnectionStrings:IndusKeyline not configured.");
         // "Default" is resolved mode-aware (same as Db.cs): the app DB connection strings live under
         // ConnectionStrings:{Local|Server}:Default, NOT a flat ConnectionStrings:Default. DatabaseMode
         // (default "Local") picks the section; fall back to a flat Default for older configs.
@@ -33,6 +37,7 @@ public sealed class ModulesRepository
 
     private SqlConnection Control() => new(_controlCs);
     private SqlConnection Local() => new(_localCs);  // app DB (app.Users, audit log)
+    private SqlConnection Keyline() => new(_keylineCs);  // shared enterprise module catalog (IndusEnterpriseKeyline)
 
     private sealed class AppUserAuth { public long UserId { get; set; } public string? FullName { get; set; } public string? Email { get; set; } }
     private static SqlConnection Client(string cs)
@@ -422,13 +427,19 @@ public sealed class ModulesRepository
     /// </summary>
     public async Task<List<ClientModuleDto>> GetCatalogRichAsync(string app)
     {
-        var table = MasterTable(app);
-        using var c = Control();
+        // Sourced from the shared Keyline enterprise catalog (IndusEnterpriseKeyline.dbo.ModuleMaster) —
+        // the same master the client Change-Request Module / Sub-Module dropdowns use. Enterprise-wide
+        // (not per-app); the `app` argument is kept for API compatibility. Soft-deleted rows excluded.
+        _ = app;
+        using var c = Keyline();
         await c.OpenAsync();
         return (await c.QueryAsync<ClientModuleDto>(
-            $@"SELECT ModuleId, ModuleName, ModuleHeadName, ModuleDisplayName, ModuleHeadDisplayName,
-                      ModuleHeadDisplayOrder, ModuleDisplayOrder, SetGroupIndex
-               FROM [{table}] ORDER BY ModuleHeadName, ModuleDisplayName")).ToList();
+            @"SELECT CAST(ModuleID AS int) AS ModuleId, ModuleName, ModuleHeadName, ModuleDisplayName, ModuleHeadDisplayName,
+                     ModuleHeadDisplayOrder, ModuleDisplayOrder, SetGroupIndex
+              FROM dbo.ModuleMaster
+              WHERE ISNULL(IsDeletedTransaction,0)=0
+                AND NULLIF(LTRIM(RTRIM(ModuleHeadName)),'') IS NOT NULL
+              ORDER BY ModuleHeadName, ModuleDisplayName")).ToList();
     }
 
     public async Task<int> CreateClientModuleAsync(ClientModuleRequest req)

@@ -105,6 +105,37 @@ public sealed class TrackerAiController : ControllerBase
             return Ok(new { success = false, message = ex.Message });
         }
     }
+
+    /// <summary>Rewrite free text into clear, professional English (e.g. a Point / issue description). Uses the acting user's Gemini key.</summary>
+    [HttpPost("rewrite")]
+    public async Task<IActionResult> Rewrite([FromBody] RewriteRequest? req)
+    {
+        var apiKey = await ResolveKeyAsync();
+        if (string.IsNullOrWhiteSpace(apiKey))
+            return Ok(new { success = false, message = "Add your own free Gemini API key in Settings → AI to use this." });
+
+        var text = (req?.Text ?? "").Trim();
+        if (text.Length == 0)
+            return Ok(new { success = false, message = "Nothing to convert — type a description first." });
+        if (text.Length > 8000) text = text[..8000];   // keep the request light
+
+        var prompt =
+            "Rewrite the text below in clear, professional English suitable for a software issue/task description. " +
+            "Fix grammar, spelling and phrasing so it reads naturally. Keep ALL the original meaning and every technical detail; " +
+            "do NOT add new facts, assumptions, greetings or sign-offs. Keep it concise; preserve line breaks / bullet points if present. " +
+            "Output ONLY the rewritten text — no preamble, no quotes, no markdown, no explanation.\n\n" +
+            text;
+
+        try
+        {
+            var result = await _gemini.GenerateAsync(prompt, apiKey);
+            return Ok(new { success = true, text = (result ?? "").Trim() });
+        }
+        catch (Exception ex)
+        {
+            return Ok(new { success = false, message = ex.Message });
+        }
+    }
 }
 
 public sealed class SummarizeRequest
@@ -118,4 +149,9 @@ public sealed class SummarizeEmailRequest
     public string? Subject { get; set; }
     public string? From { get; set; }
     public string? Body { get; set; }
+}
+
+public sealed class RewriteRequest
+{
+    public string? Text { get; set; }
 }

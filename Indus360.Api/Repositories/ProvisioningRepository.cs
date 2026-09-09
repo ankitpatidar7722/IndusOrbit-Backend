@@ -1,3 +1,4 @@
+using System.Data;
 using System.Text;
 using Dapper;
 using Indus360.Api.Models;
@@ -123,16 +124,16 @@ public sealed class ProvisioningRepository
                 commandTimeout: 600);
         }
 
-        // D) cross-server → build UNC admin-share path
+        // D) Make the .bak reachable by the TARGET server.
+        //    Same-server → the source path is already local. Cross-server → SMB/UNC between these cloud
+        //    SQL boxes is NOT available, so we PULL the .bak off the source through the SQL connection
+        //    (OPENROWSET … SINGLE_BLOB, ≤2 GB) and PUSH it onto the target's own disk via OLE Automation
+        //    (ADODB.Stream) — no file sharing needed. OLE handles are batch-scoped, so the whole file is
+        //    written in one batch as a single varbinary(max) parameter. Needs OLE Automation on the target
+        //    (Windows SQL Server); SQL-on-Linux can't do this — such a target must be pre-loaded instead.
         var restorePath = backupPath;
         var isCrossServer = sourceServer != targetServer;
-        if (isCrossServer)
-        {
-            var sourceIp = sourceServer!.Replace(",1433", "").Replace(",1434", "");
-            var drive = backupPath.Substring(0, 1);
-            var afterDrive = backupPath.Substring(2);
-            restorePath = $@"\\{sourceIp}\{drive}${afterDrive}";
-        }
+        string? targetBak = null;   // cross-server: the .bak we land on the target (cleaned up at the end)
 
         // E) RESTORE on the target server
         await using (var tconn = MasterConnection(targetServer))
@@ -145,14 +146,65 @@ public sealed class ProvisioningRepository
 
             if (isCrossServer)
             {
+                // Where the transferred .bak will land on the target (its own default backup folder).
+                var tgtBackupDir = await tconn.ExecuteScalarAsync<string>(
+                    "SELECT CAST(SERVERPROPERTY('InstanceDefaultBackupPath') AS NVARCHAR(500))") ?? @"C:\Temp";
+                var winSep = !tgtBackupDir.Contains('/');
+                targetBak = tgtBackupDir.TrimEnd('\\', '/') + (winSep ? "\\" : "/") + $"{newDbName}_{DateTime.Now:yyyyMMddHHmmss}.bak";
+
+                // 1) pull the .bak bytes off the source through its connection
+                byte[] bakBytes;
+                await using (var read = MasterConnection(sourceServer))
+                {
+                    await read.OpenAsync();
+                    await using var rcmd = new SqlCommand(
+                        $"SELECT BulkColumn FROM OPENROWSET(BULK N'{backupPath.Replace("'", "''")}', SINGLE_BLOB) AS f", read)
+                        { CommandTimeout = 600 };
+                    var blob = await rcmd.ExecuteScalarAsync();
+                    if (blob is null or DBNull)
+                        return fail("Could not read the backup file back from the source server.");
+                    bakBytes = (byte[])blob;
+                }
+
+                // 2) best-effort: enable OLE Automation on the target (Windows SQL). If it can't be enabled
+                //    (e.g. SQL on Linux), the write below throws with a clear message.
                 try
                 {
-                    await tconn.ExecuteAsync($"EXEC master.dbo.xp_fileexist N'{restorePath}'", commandTimeout: 15);
+                    await tconn.ExecuteAsync(
+                        "IF EXISTS (SELECT 1 FROM sys.configurations WHERE name='Ole Automation Procedures' AND value_in_use=0) " +
+                        "BEGIN EXEC sp_configure 'show advanced options',1; RECONFIGURE; " +
+                        "EXEC sp_configure 'Ole Automation Procedures',1; RECONFIGURE; END", commandTimeout: 30);
                 }
-                catch
+                catch { /* surfaced by the write */ }
+
+                // 3) push the bytes onto the target's disk in ONE batch (OLE handles are batch-scoped)
+                try
                 {
-                    return fail($"Backup file not reachable at {restorePath}. Ensure SMB (445), the admin C$ share, and the SQL service account's network access are available.");
+                    await using var wcmd = new SqlCommand(@"
+                        DECLARE @hr int, @o int;
+                        EXEC @hr = sp_OACreate 'ADODB.Stream', @o OUT;
+                        IF @hr <> 0 BEGIN RAISERROR('OLE create failed (0x%08X)', 16, 1, @hr); RETURN; END
+                        EXEC sp_OASetProperty @o, 'Type', 1;
+                        EXEC sp_OAMethod @o, 'Open';
+                        EXEC sp_OAMethod @o, 'Write', NULL, @bytes;
+                        EXEC @hr = sp_OAMethod @o, 'SaveToFile', NULL, @path, 2;
+                        EXEC sp_OAMethod @o, 'Close';
+                        EXEC sp_OADestroy @o;
+                        IF @hr <> 0 BEGIN RAISERROR('OLE save failed (0x%08X)', 16, 1, @hr); RETURN; END", tconn)
+                        { CommandTimeout = 600 };
+                    wcmd.Parameters.Add("@bytes", SqlDbType.VarBinary, -1).Value = bakBytes;
+                    wcmd.Parameters.AddWithValue("@path", targetBak);
+                    await wcmd.ExecuteNonQueryAsync();
                 }
+                catch (SqlException ex)
+                {
+                    return fail(
+                        $"Could not copy the backup onto {targetServer}. Cross-server provisioning needs OLE Automation " +
+                        "on the target (a Windows SQL Server). If the target is SQL Server on Linux this path is unsupported — " +
+                        $"provision on a Windows server, or pre-load the template onto the target. Details: {ex.Message}");
+                }
+
+                restorePath = targetBak;   // now a LOCAL path on the target
             }
 
             var files = (await tconn.QueryAsync($"RESTORE FILELISTONLY FROM DISK = N'{restorePath}'", commandTimeout: 120)).ToList();
@@ -189,14 +241,24 @@ public sealed class ProvisioningRepository
                 commandTimeout: 600);
         }
 
-        // F) best-effort cleanup of the .bak (non-critical; xp_cmdshell may be disabled)
+        // F) best-effort cleanup of the .bak files (non-critical). xp_delete_file needs no xp_cmdshell.
         try
         {
             await using var clean = MasterConnection(sourceServer);
             await clean.OpenAsync();
-            await clean.ExecuteAsync($"EXEC master.dbo.xp_cmdshell 'del \"{backupPath}\"'", commandTimeout: 30);
+            await clean.ExecuteAsync($"EXEC master.dbo.xp_delete_file 0, N'{backupPath.Replace("'", "''")}'", commandTimeout: 30);
         }
         catch { /* non-critical */ }
+        if (targetBak is not null)
+        {
+            try
+            {
+                await using var cleanT = MasterConnection(targetServer);
+                await cleanT.OpenAsync();
+                await cleanT.ExecuteAsync($"EXEC master.dbo.xp_delete_file 0, N'{targetBak.Replace("'", "''")}'", commandTimeout: 30);
+            }
+            catch { /* non-critical */ }
+        }
 
         // G) build & return the new client connection string
         var csb = ControlCsb;

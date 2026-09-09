@@ -31,6 +31,14 @@ public sealed class SignoffDataRepository
         "Inventory", "Scheduling", "Production", "Quality Control", "Dispatch", "Machine Maintenance",
     };
 
+    // A doc scope-row may appear under more than one ModuleHeadName across different client DBs.
+    // The KEY is the canonical name used in signoff.html's data-module; ANY listed alias in the
+    // client's ModuleMaster ticks that checkbox. (e.g. Job Card = ProductionWorkOrder OR "Production Work Order".)
+    private static readonly Dictionary<string, string[]> HeadAliases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["ProductionWorkOrder"] = new[] { "ProductionWorkOrder", "Production Work Order" },
+    };
+
     public async Task<SignoffData> GetAsync(string companyUserId)
     {
         var d = new SignoffData();
@@ -81,7 +89,9 @@ public sealed class SignoffDataRepository
                     "SELECT DISTINCT ModuleHeadName FROM ModuleMaster WHERE ISNULL(IsDeletedTransaction,0)=0 AND ModuleHeadName IS NOT NULL"))
                     .Select(h => (h ?? "").Trim())
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                d.InScopeModules = ScopeHeads.Where(h => heads.Contains(h)).ToList();
+                d.InScopeModules = ScopeHeads
+                    .Where(h => (HeadAliases.TryGetValue(h, out var aliases) ? aliases : new[] { h }).Any(a => heads.Contains(a)))
+                    .ToList();
             }
             catch { /* client DB unreachable / schema differs — leave those fields blank */ }
         }

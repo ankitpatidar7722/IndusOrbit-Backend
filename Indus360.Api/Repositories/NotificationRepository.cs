@@ -69,34 +69,70 @@ public sealed class NotificationRepository
         await CreateAsync(db, userId, message, url);
     }
 
+    // Ticket title, trimmed + truncated, for a clean one-line notification (e.g. — "Login page crashes…").
+    private static string TitleContext(string? title)
+    {
+        var t = (title ?? "").Trim();
+        if (t.Length == 0) return "";
+        if (t.Length > 50) t = t[..50].TrimEnd() + "…";
+        return $" — \"{t}\"";
+    }
+
+    private sealed record PointNotifyInfo(string? Title, int? AssignedToID, int? ReportedByID);
+
+    /// <summary>
+    /// Point-workflow notifications. Each <paramref name="kind"/> targets the ONE person waiting on
+    /// that hand-off — the assigned developer or the reporter — with a clear, professional message
+    /// and a deep link to the board where they act on it.
+    /// </summary>
     public async Task NotifyPointEventAsync(int pointId, string kind)
     {
         await using var db = await _db.OpenTmsAsync();
-        var title = (await db.ExecuteScalarAsync<string>("SELECT Title FROM dbo.Points WHERE PointID = @pointId", new { pointId })) ?? "";
+        var p = await db.QuerySingleOrDefaultAsync<PointNotifyInfo>(
+            "SELECT Title, AssignedToID, ReportedByID FROM dbo.Points WHERE PointID = @pointId", new { pointId });
+        if (p is null) return;
+        var ctx = TitleContext(p.Title);
+
         int? target;
         string message, url;
         switch (kind)
         {
+            // ── To the assigned developer ──
             case "assigned":
-                target = await db.ExecuteScalarAsync<int?>("SELECT AssignedToID FROM dbo.Points WHERE PointID = @pointId", new { pointId });
-                message = $"New point assigned: #{pointId} {title}";
-                url = "/point-management/developer";
-                break;
-            case "sent-to-support":
-                target = await db.ExecuteScalarAsync<int?>("SELECT ReportedByID FROM dbo.Points WHERE PointID = @pointId", new { pointId });
-                message = $"Point #{pointId} awaiting your support verification";
-                url = "/point-management/support";
-                break;
+                target = p.AssignedToID;
+                message = $"Ticket #{pointId} has been assigned to you{ctx}. Please review the details and begin work.";
+                url = "/point-management/developer"; break;
+            case "support-verified":
+                target = p.AssignedToID;
+                message = $"Ticket #{pointId} has cleared Support verification{ctx}. You can now send it for merge.";
+                url = "/point-management/developer"; break;
             case "reopened":
-                target = await db.ExecuteScalarAsync<int?>("SELECT AssignedToID FROM dbo.Points WHERE PointID = @pointId", new { pointId });
-                message = $"Point #{pointId} was reopened for you";
-                url = "/point-management/developer";
-                break;
+                target = p.AssignedToID;
+                message = $"Ticket #{pointId} has been reopened and needs your attention{ctx}. Please review the remarks and resume work.";
+                url = "/point-management/developer"; break;
+            case "merge-reopened":
+                target = p.AssignedToID;
+                message = $"Ticket #{pointId} was returned from Merge review{ctx}. Please address the remarks and resubmit.";
+                url = "/point-management/developer"; break;
+
+            // ── To the reporter / support owner ──
+            case "sent-to-support":
+                target = p.ReportedByID;
+                message = $"Ticket #{pointId} is ready for your Support verification{ctx}. Please review and confirm.";
+                url = "/point-management/support"; break;
+            case "verified":
+                target = p.ReportedByID;
+                message = $"Ticket #{pointId} has been approved and queued for assignment{ctx}.";
+                url = "/point-management/manage-points"; break;
+            case "rejected":
+                target = p.ReportedByID;
+                message = $"Ticket #{pointId} has been marked Un-Active{ctx}. Please review the admin remarks for details.";
+                url = "/point-management/manage-points"; break;
             case "closed":
-                target = await db.ExecuteScalarAsync<int?>("SELECT ReportedByID FROM dbo.Points WHERE PointID = @pointId", new { pointId });
-                message = $"Point #{pointId} was closed";
-                url = "/point-management/manage-points";
-                break;
+                target = p.ReportedByID;
+                message = $"Ticket #{pointId} has been verified and closed{ctx}. Thank you for reporting.";
+                url = "/point-management/manage-points"; break;
+
             default:
                 return;
         }

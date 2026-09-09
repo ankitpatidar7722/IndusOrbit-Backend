@@ -32,6 +32,8 @@ builder.Services.AddScoped<ProjectAssignmentRepository>();
 builder.Services.AddScoped<ClientTabPermissionRepository>();
 builder.Services.AddScoped<MessagingRepository>();
 builder.Services.AddScoped<AppNotificationRepository>();
+builder.Services.AddScoped<PushSubscriptionRepository>();
+builder.Services.AddSingleton<Indus360.Api.Services.WebPushSender>();
 builder.Services.AddScoped<Indus360.Api.Services.NotificationPusher>();
 builder.Services.AddSingleton<Indus360.Api.Services.PresenceTracker>();
 builder.Services.AddSignalR();

@@ -116,13 +116,21 @@ public sealed class PointManagementController : ControllerBase
 
     [HttpPost("points/{id:int}/verify")]
     public async Task<IActionResult> Verify(int id)
-        => await _workflow.MarkVerifiedAsync(id) ? Ok(new { ok = true }) : NotFound();
+    {
+        if (!await _workflow.MarkVerifiedAsync(id)) return NotFound();
+        await _notify.NotifyPointEventAsync(id, "verified");   // → reporter: approved & queued
+        return Ok(new { ok = true });
+    }
 
     public sealed class UnActiveRequest { public string? AdminRemark { get; set; } }
 
     [HttpPost("points/{id:int}/unactive")]
     public async Task<IActionResult> UnActive(int id, [FromBody] UnActiveRequest req)
-        => await _workflow.MarkUnActiveAsync(id, req?.AdminRemark) ? Ok(new { ok = true }) : NotFound();
+    {
+        if (!await _workflow.MarkUnActiveAsync(id, req?.AdminRemark)) return NotFound();
+        await _notify.NotifyPointEventAsync(id, "rejected");   // → reporter: marked un-active
+        return Ok(new { ok = true });
+    }
 
     /// <summary>Undo an "Un-Active" — put a rejected point back in the pending verification queue.</summary>
     [HttpPost("points/{id:int}/reactivate")]
@@ -237,7 +245,12 @@ public sealed class PointManagementController : ControllerBase
 
     [HttpPost("points/{id:int}/support/verify")]
     public async Task<IActionResult> SupportVerify(int id, [FromBody] PointActionRequest r)
-        => await _workflow.MarkSupportVerifiedAsync(id, r.UserId, r.Remark) ? Ok(new { ok = true }) : BadRequest(new { message = "Point is not in PendingSupport state." });
+    {
+        if (!await _workflow.MarkSupportVerifiedAsync(id, r.UserId, r.Remark))
+            return BadRequest(new { message = "Point is not in PendingSupport state." });
+        await _notify.NotifyPointEventAsync(id, "support-verified");   // → developer: cleared support, send for merge
+        return Ok(new { ok = true });
+    }
 
     [HttpPost("points/{id:int}/support/send-to-qc")]
     public async Task<IActionResult> SupportSendToQc(int id, [FromBody] PointActionRequest r)
@@ -254,7 +267,12 @@ public sealed class PointManagementController : ControllerBase
 
     [HttpPost("points/{id:int}/merge/reopen")]
     public async Task<IActionResult> MergeReopen(int id, [FromBody] PointActionRequest r)
-        => await _workflow.MergeReopenAsync(id, r.UserId, r.Remark) ? Ok(new { ok = true }) : BadRequest(new { message = "Point is not in PendingMerge state." });
+    {
+        if (!await _workflow.MergeReopenAsync(id, r.UserId, r.Remark))
+            return BadRequest(new { message = "Point is not in PendingMerge state." });
+        await _notify.NotifyPointEventAsync(id, "merge-reopened");   // → developer: returned from merge
+        return Ok(new { ok = true });
+    }
 
     // ---------------- Tickets (Assign / Manage Assignments) ----------------
     [HttpPost("tickets/assign")]
@@ -265,7 +283,10 @@ public sealed class PointManagementController : ControllerBase
         if (req.CreatedById <= 0)
             return BadRequest(new { message = "Your account is not linked to a Point Management (TMS) user. Ask an admin to add you in Manage Users." });
         var ticketId = await _tickets.CreateAndAssignAsync(req);
-        await _notify.NotifyUserAsync(req.DevId, $"{req.PointIds.Count} point(s) assigned to you", "/point-management/developer");
+        var msg = req.PointIds.Count == 1
+            ? $"A new ticket (#{req.PointIds[0]}) has been assigned to you. Please review the details and begin work."
+            : $"{req.PointIds.Count} new tickets have been assigned to you. Please review and begin work.";
+        await _notify.NotifyUserAsync(req.DevId, msg, "/point-management/developer");
         return Ok(new { ticketId });
     }
 

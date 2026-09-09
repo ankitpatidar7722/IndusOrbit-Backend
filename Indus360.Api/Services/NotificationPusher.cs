@@ -13,8 +13,9 @@ public sealed class NotificationPusher
 {
     private readonly AppNotificationRepository _repo;
     private readonly IHubContext<MessagingHub> _hub;
-    public NotificationPusher(AppNotificationRepository repo, IHubContext<MessagingHub> hub)
-    { _repo = repo; _hub = hub; }
+    private readonly WebPushSender _webPush;
+    public NotificationPusher(AppNotificationRepository repo, IHubContext<MessagingHub> hub, WebPushSender webPush)
+    { _repo = repo; _hub = hub; _webPush = webPush; }
 
     /// <summary>Create + push a notification to one user (skips if that type is disabled in their settings).</summary>
     public async Task PushAsync(int companyId, long userId, string type,
@@ -30,7 +31,17 @@ public sealed class NotificationPusher
         var dto = await _repo.GetAsync(id);
         if (dto == null) return;
         var unread = await _repo.UnreadCountAsync(userId);
+        // 1) Real-time in-app push (open tabs) via SignalR.
         await _hub.Clients.Group(MessagingHub.UserGroup(companyId, userId))
             .SendAsync("Notification", new { notification = dto, unread });
+        // 2) OS-level Web Push (works even when the app is closed). Never throws.
+        await _webPush.SendToUserAsync(companyId, userId, new
+        {
+            title = string.IsNullOrWhiteSpace(title) ? "Indus Orbit" : title,
+            body = body ?? "",
+            url = string.IsNullOrWhiteSpace(link) ? "/" : link,
+            tag = $"{type}-{refId}",
+            type,
+        });
     }
 }
