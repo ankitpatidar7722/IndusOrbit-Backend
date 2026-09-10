@@ -42,6 +42,17 @@ namespace Backend.Services
         Task<string> CreateCompressedBackupAsync(
             string connectionString,
             string databaseName,
+            Action<int, string>? onProgress = null,
             CancellationToken cancellationToken = default);
+
+        /// <summary>
+        /// Starts a compressed backup in the background and returns an operationId immediately. Progress is
+        /// published to the operation-status store (poll GetOperationStatusAsync); the finished .zip path is
+        /// held for a follow-up download (TryTakeResultZip). Used by the Indus360 "Database Backup" page.
+        /// </summary>
+        string StartTrackedBackup(string connectionString, string databaseName);
+
+        /// <summary>Takes (and removes) the finished .zip path for a completed tracked backup.</summary>
+        bool TryTakeResultZip(string operationId, out string zipPath);
     }
 }

@@ -232,6 +232,47 @@ namespace Backend.Services
             }
         }
 
+        // ---- Indus360-native tracked download ----------------------------------------------------
+        // Runs CreateCompressedBackupAsync in the background, publishing % progress to _operationStatuses
+        // (polled via GetOperationStatusAsync) and holding the finished .zip path in _resultZips for the
+        // follow-up /download call.
+        private static readonly ConcurrentDictionary<string, string> _resultZips = new();
+
+        public string StartTrackedBackup(string connectionString, string databaseName)
+        {
+            var operationId = Guid.NewGuid().ToString();
+            _operationStatuses[operationId] = new OperationStatusResponse
+            {
+                OperationId = operationId,
+                Stage = "Queued",
+                PercentComplete = 0,
+                Message = "Starting backup",
+                StartedAt = DateTime.Now
+            };
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var zipPath = await CreateCompressedBackupAsync(connectionString, databaseName,
+                        (percent, stage) => UpdateOperationStatus(operationId, stage, percent, stage));
+                    _resultZips[operationId] = zipPath;
+                    UpdateOperationStatus(operationId, "Complete", 100, "Backup ready to download",
+                        isComplete: true, success: true);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[BackupRestore] tracked backup {operationId} failed: {ex.Message}");
+                    UpdateOperationStatus(operationId, "Failed", 0, $"Backup failed: {ex.Message}",
+                        isComplete: true, success: false, error: ex.Message);
+                }
+            });
+            return operationId;
+        }
+
+        /// <summary>Takes (and removes) the finished .zip path for a completed tracked backup.</summary>
+        public bool TryTakeResultZip(string operationId, out string zipPath)
+            => _resultZips.TryRemove(operationId, out zipPath!);
+
         public Task<OperationStatusResponse?> GetOperationStatusAsync(string operationId)
         {
             if (_operationStatuses.TryGetValue(operationId, out var status))
@@ -240,105 +281,136 @@ namespace Backend.Services
             return Task.FromResult<OperationStatusResponse?>(null);
         }
 
+        /// <summary>
+        /// Creates a COPY_ONLY backup of <paramref name="databaseName"/> on its own SQL server, then reads
+        /// the .bak back THROUGH the SQL connection (OPENROWSET BULK, streamed) straight into a .zip on the
+        /// API host — so it works even when the API and the SQL server are different machines (no file share
+        /// needed). Returns the local .zip path to stream to the browser.
+        /// </summary>
         public async Task<string> CreateCompressedBackupAsync(
             string connectionString,
             string databaseName,
+            Action<int, string>? onProgress = null,
             CancellationToken cancellationToken = default)
         {
             try
             {
                 Console.WriteLine($"[BackupRestore] Creating compressed backup for database '{databaseName}'");
 
-                // Ensure backup directory exists
                 if (!Directory.Exists(_config.BackupStoragePath))
-                {
-                    Console.WriteLine($"[BackupRestore] Creating backup directory: {_config.BackupStoragePath}");
                     Directory.CreateDirectory(_config.BackupStoragePath);
-                }
-                else
-                {
-                    Console.WriteLine($"[BackupRestore] Backup directory exists: {_config.BackupStoragePath}");
-                }
 
-                // Create backup file
                 using var conn = new SqlConnection(connectionString);
                 await conn.OpenAsync(cancellationToken);
 
-                Console.WriteLine($"[BackupRestore] Connected to SQL Server");
-
                 var timestamp = DateTime.Now.ToString("yyyyMMddHHmmss");
                 var backupFileName = $"{databaseName}_{timestamp}.bak";
-
-                // Use local backup path (should be UNC path for remote servers)
-                var backupPath = Path.Combine(_config.BackupStoragePath, backupFileName);
-
-                Console.WriteLine($"[BackupRestore] Backup path: {backupPath}");
-
-                Console.WriteLine($"[BackupRestore] Creating backup: {backupPath}");
-                Console.WriteLine($"[BackupRestore] Executing BACKUP DATABASE command...");
-
-                var backupSql = $@"
-                    BACKUP DATABASE [{databaseName}]
-                    TO DISK = N'{backupPath}'
-                    WITH
-                        COPY_ONLY,
-                        FORMAT,
-                        INIT,
-                        SKIP,
-                        NOUNLOAD,
-                        STATS = 10,
-                        CHECKSUM";
-
-                await conn.ExecuteAsync(backupSql, commandTimeout: 600);
-
-                Console.WriteLine($"[BackupRestore] Backup created successfully");
-
-                // Verify backup file exists and get its size
-                if (!File.Exists(backupPath))
-                {
-                    throw new Exception($"Backup file was not created: {backupPath}");
-                }
-
-                var backupFileInfo = new FileInfo(backupPath);
-                Console.WriteLine($"[BackupRestore] Backup file size: {backupFileInfo.Length / 1024 / 1024} MB");
-
-                if (backupFileInfo.Length == 0)
-                {
-                    throw new Exception($"Backup file is empty: {backupPath}");
-                }
-
-                // Compress to ZIP
                 var zipFileName = $"{databaseName}_{timestamp}.zip";
                 var zipPath = Path.Combine(_config.BackupStoragePath, zipFileName);
 
-                Console.WriteLine($"[BackupRestore] Compressing backup to: {zipPath}");
+                // The .bak must be written on the SQL SERVER's own disk (NOT the API's) to a path that
+                // exists + is writable by the SQL service account. Prefer the instance default backup dir,
+                // then the default data dir, then master's own data-file folder (that folder always exists).
+                // Never fall back to _config.BackupStoragePath (that is the API host's path, not the SQL box's).
+                var serverBackupDir = await conn.ExecuteScalarAsync<string>(
+                    "SELECT CAST(SERVERPROPERTY('InstanceDefaultBackupPath') AS NVARCHAR(500))");
+                if (string.IsNullOrWhiteSpace(serverBackupDir))
+                    serverBackupDir = await conn.ExecuteScalarAsync<string>(
+                        "SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS NVARCHAR(500))");
+                if (string.IsNullOrWhiteSpace(serverBackupDir))
+                    serverBackupDir = await conn.ExecuteScalarAsync<string>(
+                        @"SELECT LEFT(physical_name, LEN(physical_name) - CHARINDEX(N'\', REVERSE(physical_name)) + 1)
+                          FROM master.sys.master_files WHERE database_id = 1 AND file_id = 1");
+                if (string.IsNullOrWhiteSpace(serverBackupDir))
+                    throw new Exception("Could not determine a writable backup directory on the SQL server.");
+                serverBackupDir = serverBackupDir.Trim();
+                if (!serverBackupDir.EndsWith("\\")) serverBackupDir += "\\";
+                var remoteBakPath = serverBackupDir + backupFileName;
+                var remoteBakEsc = remoteBakPath.Replace("'", "''");
 
-                using (var zipArchive = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+                var swTotal = System.Diagnostics.Stopwatch.StartNew();
+
+                // 1) Fresh COPY_ONLY backup. Try native backup COMPRESSION first (a compressed .bak is far
+                //    smaller). Web/Express editions reject COMPRESSION -> fall back to uncompressed.
+                var nativeCompressed = true;
+                async Task RunBackupAsync(bool compress)
                 {
-                    zipArchive.CreateEntryFromFile(backupPath, backupFileName, CompressionLevel.Optimal);
+                    var extra = compress ? "COMPRESSION, " : "";
+                    var sql = $@"BACKUP DATABASE [{databaseName}] TO DISK = N'{remoteBakEsc}'
+                                 WITH COPY_ONLY, {extra}FORMAT, INIT, SKIP, NOUNLOAD, STATS = 25";
+                    await conn.ExecuteAsync(new CommandDefinition(sql, commandTimeout: 1800, cancellationToken: cancellationToken));
                 }
-
-                // Verify ZIP file was created and contains the entry
-                if (!File.Exists(zipPath))
-                {
-                    throw new Exception($"ZIP file was not created: {zipPath}");
-                }
-
-                var zipFileInfo = new FileInfo(zipPath);
-                Console.WriteLine($"[BackupRestore] Compression complete. ZIP size: {zipFileInfo.Length / 1024 / 1024} MB");
-
-                // Delete original .bak file to save space
+                onProgress?.Invoke(12, "Backing up database");
+                var swBackup = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
-                    File.Delete(backupPath);
-                    Console.WriteLine($"[BackupRestore] Deleted temporary .bak file");
+                    Console.WriteLine($"[BackupRestore] BACKUP (COPY_ONLY + COMPRESSION) '{databaseName}' -> {remoteBakPath}");
+                    await RunBackupAsync(true);
                 }
-                catch (Exception ex)
+                catch (SqlException ex) when (ex.Number == 1844 || ex.Message.Contains("COMPRESSION", StringComparison.OrdinalIgnoreCase))
                 {
-                    Console.WriteLine($"[BackupRestore] Warning: Could not delete .bak file: {ex.Message}");
+                    Console.WriteLine($"[BackupRestore] Native compression unsupported on this edition - retrying uncompressed.");
+                    nativeCompressed = false;
+                    await RunBackupAsync(false);
+                }
+                Console.WriteLine($"[BackupRestore] BACKUP done in {swBackup.Elapsed.TotalSeconds:F0}s");
+                onProgress?.Invoke(35, "Backup complete");
+
+                // 2) THE KEY SPEED-UP: if the .bak is NOT already compressed (Web/Express), zip it ON THE
+                //    SERVER so we transfer far fewer bytes back. The slow leg is SQL server -> API; a
+                //    backend-side zip would NOT shrink that (only the already-fast API -> browser leg).
+                //    Best-effort: if xp_cmdshell/Compress-Archive is unavailable, transfer the raw .bak.
+                string? serverZipPath = null;
+                if (!nativeCompressed)
+                {
+                    onProgress?.Invoke(45, "Compressing on server");
+                    var swZip = System.Diagnostics.Stopwatch.StartNew();
+                    var candidate = remoteBakPath + ".zip";
+                    if (await TryServerSideZipAsync(conn, remoteBakPath, candidate, cancellationToken))
+                    {
+                        serverZipPath = candidate;
+                        Console.WriteLine($"[BackupRestore] server-side zip done in {swZip.Elapsed.TotalSeconds:F0}s");
+                        onProgress?.Invoke(70, "Compressed on server");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[BackupRestore] server-side zip unavailable - transferring raw .bak");
+                    }
                 }
 
-                // Log activity
+                // 3) Stream the smallest available file back and produce the local download .zip.
+                onProgress?.Invoke(75, "Downloading backup");
+                var swRead = System.Diagnostics.Stopwatch.StartNew();
+                if (serverZipPath != null)
+                {
+                    // Server already produced a .zip (containing the .bak) - stream its bytes straight into
+                    // our local .zip; it IS the download.
+                    await using var outFs = new FileStream(zipPath, FileMode.Create, FileAccess.Write,
+                        FileShare.None, 1 << 20, useAsync: true);
+                    await StreamRemoteFileAsync(conn, serverZipPath, outFs, cancellationToken);
+                }
+                else
+                {
+                    // Raw .bak (native-compressed, or server-side zip unavailable): wrap it into a .zip here.
+                    var zipLevel = nativeCompressed ? CompressionLevel.NoCompression : CompressionLevel.Fastest;
+                    using var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create);
+                    var entry = zip.CreateEntry(backupFileName, zipLevel);
+                    await using var entryStream = entry.Open();
+                    await StreamRemoteFileAsync(conn, remoteBakPath, entryStream, cancellationToken);
+                }
+                Console.WriteLine($"[BackupRestore] transfer+package done in {swRead.Elapsed.TotalSeconds:F0}s");
+                onProgress?.Invoke(95, "Packaging download");
+
+                var zipInfo = new FileInfo(zipPath);
+                if (!zipInfo.Exists || zipInfo.Length == 0)
+                    throw new Exception($"ZIP file was not created or is empty: {zipPath}");
+                Console.WriteLine($"[BackupRestore] ZIP ready: {zipPath} ({zipInfo.Length / 1024 / 1024} MB), TOTAL {swTotal.Elapsed.TotalSeconds:F0}s");
+
+                // 4) Best-effort delete of temp files left on the SQL server (not fatal if it fails).
+                await TryDeleteRemoteFileAsync(conn, remoteBakPath, cancellationToken);
+                if (serverZipPath != null)
+                    await TryDeleteRemoteFileAsync(conn, serverZipPath, cancellationToken);
+
                 await _activityLog.LogActivityAsync(new CreateActivityLogRequest
                 {
                     ActionType = "Download Compressed Backup",
@@ -354,6 +426,66 @@ namespace Backend.Services
                 Console.WriteLine($"[BackupRestore] CreateCompressedBackup error: {ex.Message}");
                 throw;
             }
+        }
+
+        /// <summary>OPENROWSET(BULK ... SINGLE_BLOB) reads a file on the SQL box and streams its bytes into dest.</summary>
+        private static async Task StreamRemoteFileAsync(SqlConnection conn, string remotePath, Stream dest, CancellationToken ct)
+        {
+            var sql = $"SELECT BulkColumn FROM OPENROWSET(BULK N'{remotePath.Replace("'", "''")}', SINGLE_BLOB) AS x";
+            using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 1800 };
+            using var reader = await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess, ct);
+            if (!await reader.ReadAsync(ct))
+                throw new Exception("Backup file could not be read back from the SQL server.");
+            await using var blob = reader.GetStream(0);
+            await blob.CopyToAsync(dest, 4 << 20, ct); // 4 MB chunks
+        }
+
+        /// <summary>
+        /// Best-effort: zip a .bak ON the SQL server (xp_cmdshell + PowerShell Compress-Archive) so far fewer
+        /// bytes cross the connection. Returns true only if the .zip was actually produced. Never throws.
+        /// Note: Compress-Archive caps a single entry at ~2 GB; a larger .bak just fails here and we fall back.
+        /// </summary>
+        private static async Task<bool> TryServerSideZipAsync(SqlConnection conn, string bakPath, string zipPath, CancellationToken ct)
+        {
+            try
+            {
+                var psInner = $"Compress-Archive -LiteralPath '{bakPath}' -DestinationPath '{zipPath}' -CompressionLevel Fastest -Force";
+                var shellCmd = $"powershell -NoProfile -ExecutionPolicy Bypass -Command \"{psInner}\"";
+                var xp = "EXEC xp_cmdshell '" + shellCmd.Replace("'", "''") + "'";
+                await conn.ExecuteAsync(new CommandDefinition(xp, commandTimeout: 1800, cancellationToken: ct));
+                var len = await conn.ExecuteScalarAsync<long?>(
+                    $"SELECT DATALENGTH(BulkColumn) FROM OPENROWSET(BULK N'{zipPath.Replace("'", "''")}', SINGLE_BLOB) AS x");
+                return len is > 0;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[BackupRestore] server-side zip failed ({ex.Message}) - falling back to raw .bak transfer");
+                return false;
+            }
+        }
+
+        /// <summary>Best-effort delete of a file on the SQL server's own disk (OLE FSO, then xp_cmdshell). Never throws.</summary>
+        private static async Task TryDeleteRemoteFileAsync(SqlConnection conn, string remotePath, CancellationToken ct)
+        {
+            var esc = remotePath.Replace("'", "''");
+            var oleSql = $@"
+                DECLARE @fso INT, @hr INT;
+                EXEC @hr = sp_OACreate 'Scripting.FileSystemObject', @fso OUTPUT;
+                IF @hr = 0 EXEC @hr = sp_OAMethod @fso, 'DeleteFile', NULL, N'{esc}';
+                IF @fso IS NOT NULL EXEC sp_OADestroy @fso;";
+            try
+            {
+                await conn.ExecuteAsync(new CommandDefinition(oleSql, commandTimeout: 30, cancellationToken: ct));
+                return;
+            }
+            catch (Exception ex) { Console.WriteLine($"[BackupRestore] .bak delete (OLE) skipped: {ex.Message}"); }
+
+            try
+            {
+                await conn.ExecuteAsync(new CommandDefinition(
+                    $"EXEC master.dbo.xp_cmdshell 'del \"{remotePath}\"'", commandTimeout: 30, cancellationToken: ct));
+            }
+            catch (Exception ex) { Console.WriteLine($"[BackupRestore] .bak delete (xp_cmdshell) skipped: {ex.Message}"); }
         }
 
         #endregion

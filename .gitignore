@@ -27,6 +27,10 @@ wwwroot/uploads/
 # ── Local secrets (uncomment the next line to keep DB passwords OUT of the repo) ──
 # appsettings.Development.json
 
+# ── Runtime logs (artifacts — never commit) ──────
+debug_log.txt
+*.log
+
 # ── OS ────────────────────────────────────────────
 Thumbs.db
 .DS_Store
