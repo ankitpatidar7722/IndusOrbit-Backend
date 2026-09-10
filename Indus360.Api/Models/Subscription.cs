@@ -28,6 +28,9 @@ public sealed class SubscriptionCard
     public long? LoginAllowed { get; set; }
     public DateTime? LastLoginDateTime { get; set; }
     public string? CloudSubscriptionStatus { get; set; }
+    /// <summary>DB name parsed from the connection string (never the full string) — lets the UI show
+    /// "Client (Code) (DatabaseName)" so same-named clients stay distinguishable.</summary>
+    public string? DatabaseName { get; set; }
 }
 
 /// <summary>Full subscription record (detail / edit) — includes sensitive fields.</summary>

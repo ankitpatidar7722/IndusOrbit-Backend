@@ -45,7 +45,15 @@ public sealed class SubscriptionRepository
             return (await c.QueryAsync<SubscriptionCard>($@"
             SELECT CompanyUserID, CompanyUniqueCode, CompanyName, CompanyCode, ApplicationName, ApplicationVersion,
                    SubscriptionStatus, StatusDescription, SubscriptionStatusMessage, Address, City, State, Country,
-                   GSTIN, Email, Mobile, FromDate, ToDate, PaymentDueDate, LoginAllowed, LastLoginDateTime, CloudSubscriptionStatus
+                   GSTIN, Email, Mobile, FromDate, ToDate, PaymentDueDate, LoginAllowed, LastLoginDateTime, CloudSubscriptionStatus,
+                   -- Database name parsed from Conn_String (Initial Catalog=...) so the UI can distinguish
+                   -- same-named clients. The full connection string (with password) is never exposed.
+                   CASE WHEN CHARINDEX('Initial Catalog=', Conn_String) > 0
+                        THEN SUBSTRING(Conn_String,
+                               CHARINDEX('Initial Catalog=', Conn_String) + 16,
+                               CHARINDEX(';', Conn_String + ';', CHARINDEX('Initial Catalog=', Conn_String) + 16)
+                                 - (CHARINDEX('Initial Catalog=', Conn_String) + 16))
+                        ELSE NULL END AS DatabaseName
             FROM {Table}
             WHERE ISNULL(IsActive,1) = 1
             ORDER BY CompanyName")).ToList();
