@@ -7,6 +7,10 @@ publish/
 [Pp]ublish/
 *.dll
 *.pdb
+# Zipped publish output — a build artifact; must NEVER be committed (it embeds appsettings.json
+# with DB passwords + VAPID/JWT keys). Deploy uploads the publish/ folder to the server directly.
+publish.zip
+*.zip
 
 # ── IDE / editor ──────────────────────────────────
 .vs/
