@@ -27,9 +27,12 @@
     </Content>
   </ItemGroup>
 
-  <!-- Ship the generated "SOP of Web Modules" HTML docs with every publish. -->
+  <!-- Ship the generated "SOP of Web Modules" HTML docs with every publish. Must be Include (not
+       Update): plain .html files are NOT part of the Web SDK's default Content glob, so Update found
+       no items and the docs never reached publish/ — the server's SopModulesController then listed 0
+       SOP docs (SOP Document column showed "—" for every module). Include adds them to Content. -->
   <ItemGroup>
-    <Content Update="sop-web-modules\**\*.html">
+    <Content Include="sop-web-modules\**\*.html">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
