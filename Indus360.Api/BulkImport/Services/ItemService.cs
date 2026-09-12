@@ -395,8 +395,14 @@ public class ItemService : IItemService
                 var numericFields = new[] { "GSM", "SizeL", "SizeW", "SizeH", "NoOfPly", "PurchaseRate", "EstimationRate",
                                            "UnitPerPacking", "MinimumStockQty", "ShelfLife" };
 
-                // Fields where 0 is a valid value — only check presence, not positivity
-                var allowZeroFields = new[] { "SizeL", "SizeW", "SizeH", "NoOfPly" };
+                // Fields where 0 is a valid value — only check presence, not positivity.
+                // INTENTIONAL divergence from BulkImport (user-requested): for the PAPER (default) group a
+                // paper sheet must have real dimensions and WtPerPacking is computed from SizeL×SizeW, so
+                // SizeL/SizeW are NOT allow-zero for PAPER → 0 (and empty) are flagged as MissingData.
+                // All other item groups keep the original allow-zero behaviour.
+                var allowZeroFields = isPaperGroup
+                    ? new[] { "SizeH", "NoOfPly" }
+                    : new[] { "SizeL", "SizeW", "SizeH", "NoOfPly" };
 
                 if (numericFields.Contains(field))
                 {

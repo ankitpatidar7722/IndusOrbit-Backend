@@ -1,0 +1,113 @@
+{
+ "purchase-requisition": {
+  "title": "Purchase Requisition"
+ },
+ "requisition-approval": {
+  "title": "Requisition Approval"
+ },
+ "purchase-order": {
+  "title": "Purchase Order"
+ },
+ "purchase-order-approval": {
+  "title": "Purchase Order Approval"
+ },
+ "purchase-receipt-note": {
+  "title": "Purchase Receipt Note"
+ },
+ "return-to-stock": {
+  "title": "Return to Stock"
+ },
+ "return-to-supplier": {
+  "title": "Return to Supplier"
+ },
+ "purchase-invoice": {
+  "title": "Purchase Invoice"
+ },
+ "item-physical-verification": {
+  "title": "Item Physical Verification"
+ },
+ "item-issue-without-picklist": {
+  "title": "Item Issue Without Picklist"
+ },
+ "picklist-creation": {
+  "title": "Picklist Creation"
+ },
+ "picklist-status": {
+  "title": "Picklist Status"
+ },
+ "item-issue": {
+  "title": "Item Issue"
+ },
+ "sales-order-booking": {
+  "title": "Sales Order Booking"
+ },
+ "price-approval": {
+  "title": "Price Approval"
+ },
+ "delivery-note": {
+  "title": "Delivery Note"
+ },
+ "quote-list": {
+  "title": "Quote List"
+ },
+ "qc-and-packing": {
+  "title": "QC And Packing"
+ },
+ "production-entry": {
+  "title": "Production Entry"
+ },
+ "finish-good-invoice": {
+  "title": "Finish Good Invoice"
+ },
+ "product-catalog": {
+  "title": "Product Catalog"
+ },
+ "production-work-order": {
+  "title": "Production Work Order"
+ },
+ "job-schedule-release": {
+  "title": "Job Schedule Release"
+ },
+ "job-schedule-process-wise": {
+  "title": "Job Schedule Process Wise"
+ },
+ "client-stock-receipt-note": {
+  "title": "Client Stock Receipt Note"
+ },
+ "client-stock-physical-verification": {
+  "title": "Client Stock Physical Verification"
+ },
+ "client-stock-issue": {
+  "title": "Client Stock Issue"
+ },
+ "client-return-to-stock": {
+  "title": "Client Return to Stock"
+ },
+ "return-to-client": {
+  "title": "Return to Client"
+ },
+ "tool-purchase-requisition": {
+  "title": "Tool Purchase Requisition"
+ },
+ "tool-requisition-approval": {
+  "title": "Tool Requisition Approval"
+ },
+ "tool-purchase-order": {
+  "title": "Tool Purchase Order"
+ },
+ "tool-purchase-order-approval": {
+  "title": "Tool Purchase Order Approval"
+ },
+ "create-quotation": {
+  "title": "Create Quotation"
+ },
+ "quote-creation-corrugation-box": {
+  "title": "Quote Creation (Corrugation Box)"
+ },
+ "quote-creation-flexo-label": {
+  "title": "Quote Creation (Flexo Label)"
+ },
+ "pwo-content-gang-job-card": {
+  "title": "PWO Content Gang ( Job Card)"
+ }
+}

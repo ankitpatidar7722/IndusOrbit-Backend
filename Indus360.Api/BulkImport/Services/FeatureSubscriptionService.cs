@@ -186,7 +186,7 @@ public class FeatureSubscriptionService : IFeatureSubscriptionService
     private static async Task<List<ClientUserDto>> GetSahayUsersAsync(SqlConnection client)
     {
         var raw = (await client.QueryAsync<(int UserID, string UserName, string? PremiumFeatures)>(
-            "SELECT UserID, UserName, PremiumFeatures FROM UserMaster WHERE ISNULL(IsDeletedTransaction,0)=0 ORDER BY UserName")).ToList();
+            "SELECT UserID, UserName, PremiumFeatures FROM UserMaster WHERE ISNULL(IsDeletedUser,0)=0 ORDER BY UserName")).ToList();
 
         var list = new List<ClientUserDto>();
         foreach (var u in raw)
@@ -290,7 +290,7 @@ public class FeatureSubscriptionService : IFeatureSubscriptionService
         });
 
         var allUsers = (await client.QueryAsync<(int UserID, string? PremiumFeatures)>(
-            "SELECT UserID, PremiumFeatures FROM UserMaster WHERE ISNULL(IsDeletedTransaction,0)=0")).ToList();
+            "SELECT UserID, PremiumFeatures FROM UserMaster WHERE ISNULL(IsDeletedUser,0)=0")).ToList();
 
         foreach (var u in allUsers)
         {

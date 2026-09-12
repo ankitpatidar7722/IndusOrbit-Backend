@@ -18,4 +18,12 @@ public sealed class KeylineController : ControllerBase
         try { return Ok(new { success = true, data = await _repo.GetModulesAsync() }); }
         catch (Exception ex) { return Ok(new { success = false, message = ex.Message, data = Array.Empty<KeylineModuleRow>() }); }
     }
+
+    /// <summary>Web modules for the "SOP of Web Modules" grid (Keyline ModuleMaster catalog).</summary>
+    [HttpGet("sop-modules")]
+    public async Task<IActionResult> SopModules()
+    {
+        try { return Ok(new { success = true, data = await _repo.GetSopModulesAsync() }); }
+        catch (Exception ex) { return Ok(new { success = false, message = ex.Message, data = Array.Empty<KeylineSopModuleRow>() }); }
+    }
 }

@@ -27,4 +27,12 @@
     </Content>
   </ItemGroup>
 
+  <!-- Ship the generated "SOP of Web Modules" HTML docs with every publish. -->
+  <ItemGroup>
+    <Content Update="sop-web-modules\**\*.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

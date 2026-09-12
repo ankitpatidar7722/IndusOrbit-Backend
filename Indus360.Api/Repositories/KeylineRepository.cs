@@ -9,6 +9,14 @@ public sealed class KeylineModuleRow
     public string Name { get; set; } = "";   // ModuleDisplayName     → "Sub Module Name"
 }
 
+/// <summary>One web-module row for the "SOP of Web Modules" grid (from the Keyline ModuleMaster).</summary>
+public sealed class KeylineSopModuleRow
+{
+    public string ModuleName { get; set; } = "";          // stable row key (route/name)
+    public string ModuleHeadName { get; set; } = "";
+    public string ModuleDisplayName { get; set; } = "";
+}
+
 /// <summary>
 /// Read-only lookup from the Keyline enterprise catalog (IndusEnterpriseKeyline on the
 /// remote server) — used to populate the cascading Module Name / Sub Module Name dropdowns
@@ -39,5 +47,22 @@ public sealed class KeylineRepository
             WHERE NULLIF(LTRIM(RTRIM(ModuleHeadDisplayName)),'') IS NOT NULL
               AND NULLIF(LTRIM(RTRIM(ModuleDisplayName)),'') IS NOT NULL
             ORDER BY ModuleHeadDisplayName, ModuleDisplayName")).ToList();
+        });
+
+    /// <summary>Web modules for the "SOP of Web Modules" grid — the full enterprise catalog from
+    /// IndusEnterpriseKeyline.dbo.ModuleMaster (non-deleted, with a display name). Read-only, cached 30 min.</summary>
+    public async Task<List<KeylineSopModuleRow>> GetSopModulesAsync() =>
+        await _cache.GetOrCreateAsync("keyline:sop-modules", TimeSpan.FromMinutes(30), async () =>
+        {
+            using var c = new SqlConnection(_cs);
+            await c.OpenAsync();
+            return (await c.QueryAsync<KeylineSopModuleRow>(@"
+            SELECT ModuleName,
+                   ISNULL(NULLIF(LTRIM(RTRIM(ModuleHeadName)),''), ModuleHeadDisplayName) AS ModuleHeadName,
+                   ModuleDisplayName
+            FROM dbo.ModuleMaster
+            WHERE ISNULL(IsDeletedTransaction,0) = 0
+              AND NULLIF(LTRIM(RTRIM(ModuleDisplayName)),'') IS NOT NULL
+            ORDER BY ModuleHeadName, ModuleDisplayName")).ToList();
         });
 }

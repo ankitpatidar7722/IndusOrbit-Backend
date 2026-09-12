@@ -36,6 +36,38 @@ namespace Backend.Controllers
 
             _logger.LogInformation("[GetConnectionString] Starting connection string resolution");
 
+            // (Indus360) Bulk Import modules pick a CLIENT via the X-Target-Company header. Resolve that
+            // client's DB from the control DB — the SAME wiring as Program.cs's scoped SqlConnection. This
+            // controller originally used session-only resolution, so with no BulkImport session it silently
+            // fell back to the control DB and every master count came back 0. Header path takes priority.
+            var targetCompany = httpContext?.Request?.Headers["X-Target-Company"].ToString();
+            if (!string.IsNullOrWhiteSpace(targetCompany))
+            {
+                var controlCs = _configuration.GetConnectionString("IndusControl")
+                                ?? _configuration.GetConnectionString("IndusConnection");
+                if (!string.IsNullOrEmpty(controlCs))
+                {
+                    try
+                    {
+                        using var ctrl = new SqlConnection(controlCs);
+                        ctrl.Open();
+                        using var cmd = new SqlCommand(
+                            "SELECT Conn_String FROM Indus_Company_Authentication_For_Web_Modules WHERE CompanyUserID = @cuid", ctrl);
+                        cmd.Parameters.AddWithValue("@cuid", targetCompany.Trim());
+                        var clientCs = cmd.ExecuteScalar() as string;
+                        if (!string.IsNullOrWhiteSpace(clientCs))
+                        {
+                            _logger.LogInformation("[GetConnectionString] Resolved client DB from X-Target-Company header");
+                            return new SqlConnectionStringBuilder(clientCs) { TrustServerCertificate = true }.ConnectionString;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning($"[GetConnectionString] X-Target-Company resolution failed: {ex.Message}");
+                    }
+                }
+            }
+
             if (httpContext == null)
             {
                 _logger.LogWarning("[GetConnectionString] HttpContext is null");

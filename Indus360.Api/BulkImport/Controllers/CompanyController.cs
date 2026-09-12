@@ -16,9 +16,6 @@ public class CompanyController : ControllerBase
     public CompanyController(ICompanyService companyService)
     {
         _companyService = companyService;
-        try {
-             System.IO.File.AppendAllText("debug_log.txt", $"[{DateTime.Now}] CompanyController Initialized\n");
-        } catch {}
     }
 
     [HttpGet]
@@ -26,14 +23,11 @@ public class CompanyController : ControllerBase
     {
         try
         {
-            System.IO.File.AppendAllText("debug_log.txt", $"[{DateTime.Now}] GET Request Received\n");
             var company = await _companyService.GetCompanyAsync();
             return Ok(company);
         }
         catch (Exception ex)
         {
-             var errorMsg = $"[{DateTime.Now}] GET Failed: {ex.Message}\nStackTrace: {ex.StackTrace}\nInner: {ex.InnerException?.Message}\n\n";
-             System.IO.File.AppendAllText("debug_log.txt", errorMsg);
              return StatusCode(500, new { error = ex.Message });
         }
     }
@@ -46,10 +40,8 @@ public class CompanyController : ControllerBase
             return BadRequest(new { error = "Company data is required" });
         }
 
-        System.IO.File.AppendAllText("debug_log.txt", $"[{DateTime.Now}] Update Request Received for ID: {company.CompanyId}\n");
         try
         {
-            Console.WriteLine($"[DEBUG] Updating Company: {company.CompanyId} - {company.CompanyName}");
             var result = await _companyService.UpdateCompanyAsync(company);
             if (result)
             {
@@ -59,9 +51,6 @@ public class CompanyController : ControllerBase
         }
         catch (Exception ex)
         {
-            var errorMsg = $"[{DateTime.Now}] Update Failed: {ex.Message}\nStackTrace: {ex.StackTrace}\nInner: {ex.InnerException?.Message}\n\n";
-            System.IO.File.AppendAllText("debug_log.txt", errorMsg); // LOG TO DEBUG FILE
-            
             Console.WriteLine($"[ERROR] Update Failed: {ex.Message}");
             return StatusCode(500, new { error = ex.Message });
         }

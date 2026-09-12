@@ -7,6 +7,7 @@ using Indus360.Api.BulkImportSupport;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Caching.Memory;
 using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -74,6 +75,7 @@ builder.Services.AddScoped<TmsReportRepository>();
 builder.Services.AddScoped<TmsAdminRepository>();
 builder.Services.AddScoped<NotificationRepository>();
 builder.Services.AddScoped<TemplateStatusRepository>();
+builder.Services.AddScoped<SopStatusRepository>();
 builder.Services.AddScoped<AttachmentRepository>();
 // Client Kick-Off / Sign-Off finalized documents (save / view / download)
 builder.Services.AddScoped<ClientDocumentRepository>();
@@ -119,13 +121,49 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         };
     });
 
-// BulkImport's per-request tenant SqlConnection: session (JWT sessionId claim) → else IndusConnection.
+// BulkImport's per-request tenant SqlConnection:
+//   1. X-Target-Company header (Indus360 admin picks a CLIENT) → that client's DB   [highest priority]
+//   2. JWT sessionId claim (BulkImport's own login) → that company's DB
+//   3. IndusConnection default
 builder.Services.AddScoped<SqlConnection>(sp =>
 {
     var httpContextAccessor = sp.GetRequiredService<IHttpContextAccessor>();
     var config = sp.GetRequiredService<IConfiguration>();
     var sessionStore = sp.GetRequiredService<ICompanySessionStore>();
     var httpContext = httpContextAccessor.HttpContext;
+
+    // (1) Indus360 "Bulk Import" modules run behind a Product+Client picker; the chosen client's
+    // CompanyUserID arrives as X-Target-Company. Resolve that client's connection string from the
+    // control DB (cached 15 min) so the folded-in BulkImport endpoints operate on the client's own DB
+    // without a per-client login. Takes priority over the JWT company-session.
+    var targetCompany = httpContext?.Request.Headers["X-Target-Company"].ToString();
+    if (!string.IsNullOrWhiteSpace(targetCompany))
+    {
+        var cache = sp.GetRequiredService<Microsoft.Extensions.Caching.Memory.IMemoryCache>();
+        var cuid = targetCompany.Trim();
+        var cs = cache.GetOrCreate($"bulk-target-conn:{cuid}", entry =>
+        {
+            entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(15);
+            var controlCs = config.GetConnectionString("IndusControl") ?? config.GetConnectionString("IndusConnection");
+            if (string.IsNullOrEmpty(controlCs)) return null;
+            try
+            {
+                using var ctrl = new SqlConnection(controlCs);
+                ctrl.Open();
+                using var cmd = new SqlCommand(
+                    "SELECT Conn_String FROM Indus_Company_Authentication_For_Web_Modules WHERE CompanyUserID = @cuid", ctrl);
+                cmd.Parameters.AddWithValue("@cuid", cuid);
+                return cmd.ExecuteScalar() as string;
+            }
+            catch { return null; }
+        });
+        if (!string.IsNullOrWhiteSpace(cs))
+        {
+            var b = new SqlConnectionStringBuilder(cs) { TrustServerCertificate = true };
+            return new SqlConnection(b.ConnectionString);
+        }
+    }
+
     if (httpContext?.User != null)
     {
         var sessionIdClaim = httpContext.User.FindFirst("sessionId")?.Value;
@@ -194,6 +232,21 @@ if (app.Environment.IsDevelopment())
 
 app.UseCors("frontend");
 app.UseAuthentication();
+// Indus360 admin calls into the folded-in BulkImport endpoints carry X-Target-Company (the client
+// picked in the Bulk Import module) instead of a BulkImport JWT. Treat those as authenticated so the
+// endpoints' [Authorize] passes; the scoped SqlConnection resolver uses the same header to target
+// that client's DB. Internal admin tool — front with network controls / a shared secret before wider use.
+app.Use(async (ctx, next) =>
+{
+    if (ctx.User?.Identity?.IsAuthenticated != true &&
+        !string.IsNullOrWhiteSpace(ctx.Request.Headers["X-Target-Company"]))
+    {
+        var identity = new System.Security.Claims.ClaimsIdentity(
+            new[] { new System.Security.Claims.Claim("indus360-admin", "true") }, "Indus360Admin");
+        ctx.User = new System.Security.Claims.ClaimsPrincipal(identity);
+    }
+    await next();
+});
 app.UseAuthorization();
 app.MapControllers();
 app.MapHub<Indus360.Api.Hubs.MessagingHub>("/messagingHub");
