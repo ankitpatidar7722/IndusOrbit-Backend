@@ -396,13 +396,17 @@ public class ItemService : IItemService
                                            "UnitPerPacking", "MinimumStockQty", "ShelfLife" };
 
                 // Fields where 0 is a valid value — only check presence, not positivity.
-                // INTENTIONAL divergence from BulkImport (user-requested): for the PAPER (default) group a
-                // paper sheet must have real dimensions and WtPerPacking is computed from SizeL×SizeW, so
-                // SizeL/SizeW are NOT allow-zero for PAPER → 0 (and empty) are flagged as MissingData.
+                // INTENTIONAL divergences from BulkImport (user-requested):
+                //  • PAPER (default) group: a paper sheet must have real dimensions and WtPerPacking is
+                //    computed from SizeL×SizeW, so SizeL/SizeW are NOT allow-zero → 0 (and empty) → MissingData.
+                //  • REEL (group 2): SizeW must be a real width > 0, so SizeW is NOT allow-zero for REEL
+                //    (0 and empty are flagged). BulkImport allowed 0 here; Indus360 requires > 0.
                 // All other item groups keep the original allow-zero behaviour.
                 var allowZeroFields = isPaperGroup
                     ? new[] { "SizeH", "NoOfPly" }
-                    : new[] { "SizeL", "SizeW", "SizeH", "NoOfPly" };
+                    : itemGroupId == 2
+                        ? new[] { "SizeL", "SizeH", "NoOfPly" }   // REEL: SizeW > 0 required (SizeL isn't a REEL field)
+                        : new[] { "SizeL", "SizeW", "SizeH", "NoOfPly" };
 
                 if (numericFields.Contains(field))
                 {

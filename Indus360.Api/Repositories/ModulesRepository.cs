@@ -18,6 +18,7 @@ public sealed class ModulesRepository
     private readonly string _controlCs;
     private readonly string _localCs;
     private readonly string _keylineCs;
+    private readonly string? _printudeCatalogCs;
     public ModulesRepository(IConfiguration cfg)
     {
         // IndusControl is a flat, mode-independent connection string.
@@ -26,6 +27,9 @@ public sealed class ModulesRepository
         // IndusKeyline is the shared enterprise module catalog (also flat / mode-independent).
         _keylineCs = cfg.GetConnectionString("IndusKeyline")
            ?? throw new InvalidOperationException("ConnectionStrings:IndusKeyline not configured.");
+        // PrintudeERP's module catalog lives in its OWN DB (IndusPrintudeDemo, 15.206.241.195). Optional —
+        // only used when a PrintudeERP client's Module Settings tab is opened / saved.
+        _printudeCatalogCs = cfg.GetConnectionString("IndusPrintudeCatalog");
         // "Default" is resolved mode-aware (same as Db.cs): the app DB connection strings live under
         // ConnectionStrings:{Local|Server}:Default, NOT a flat ConnectionStrings:Default. DatabaseMode
         // (default "Local") picks the section; fall back to a flat Default for older configs.
@@ -38,6 +42,27 @@ public sealed class ModulesRepository
     private SqlConnection Control() => new(_controlCs);
     private SqlConnection Local() => new(_localCs);  // app DB (app.Users, audit log)
     private SqlConnection Keyline() => new(_keylineCs);  // shared enterprise module catalog (IndusEnterpriseKeyline)
+    private SqlConnection PrintudeCatalog() => new(_printudeCatalogCs
+        ?? throw new InvalidOperationException("ConnectionStrings:IndusPrintudeCatalog not configured (needed for the PrintudeERP module catalog)."));
+
+    // The module catalog shown in "Module Settings" comes from a per-application authoritative source:
+    //   Estimoprime → IndusEnterpriseKeyline (Keyline),  PrintudeERP → IndusPrintudeDemo (PrintudeCatalog).
+    // Any other app keeps the legacy per-app master table in IndusControl.
+    private (SqlConnection conn, string from) DisplayCatalog(string? app) => (app ?? "").ToLowerInvariant() switch
+    {
+        "estimoprime" or "desktop" => (Keyline(), "dbo.ModuleMaster"),
+        "printudeerp" => (PrintudeCatalog(), "dbo.ModuleMaster"),
+        _ => (Control(), $"[{MasterTable(app!)}]"),
+    };
+
+    // The row copied INTO the client DB when a module is ENABLED — must match what DisplayCatalog lists so
+    // a shown module can actually be enabled. Only PrintudeERP diverges; the rest use the shared Keyline
+    // catalog exactly as before (Estimoprime already did).
+    private (SqlConnection conn, string from) EnableSource(string? app) => (app ?? "").ToLowerInvariant() switch
+    {
+        "printudeerp" => (PrintudeCatalog(), "dbo.ModuleMaster"),
+        _ => (Keyline(), "dbo.ModuleMaster"),
+    };
 
     private sealed class AppUserAuth { public long UserId { get; set; } public string? FullName { get; set; } public string? Email { get; set; } }
     private static SqlConnection Client(string cs)
@@ -57,14 +82,22 @@ public sealed class ModulesRepository
     // ── get module settings (catalog + client status) ────────────
     public async Task<List<ModuleSettingsRow>> GetModuleSettingsAsync(string app, string connStr)
     {
-        var table = MasterTable(app);
+        var (catConn, catFrom) = DisplayCatalog(app);
         List<ModuleGroupModuleRow> catalog;
-        using (var c = Control())
+        using (var c = catConn)
         {
             await c.OpenAsync();
             catalog = (await c.QueryAsync<ModuleGroupModuleRow>(
-                $"SELECT ModuleHeadName, ModuleDisplayName, ModuleName FROM [{table}] ORDER BY ModuleHeadName, ModuleDisplayName")).ToList();
+                $"SELECT ModuleHeadName, ModuleDisplayName, ModuleName FROM {catFrom} ORDER BY ModuleHeadName, ModuleDisplayName")).ToList();
         }
+        // Dedupe by ModuleName: a module is enabled/disabled per ModuleName (the client's ModuleMaster keys
+        // on it), so it must appear ONCE in the settings list. Some per-app master tables carry a stray
+        // duplicate (e.g. SalesOrderGang.aspx under both "Order Booking" and a "Sales Order Gang" head) —
+        // without this, both rows share the same ModuleName key, so toggling one flips both in the UI.
+        catalog = catalog
+            .GroupBy(m => m.ModuleName, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First()) // catalog is ordered by head → keeps the alphabetically-first head
+            .ToList();
         var clientMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         using (var cc = Client(connStr))
         {
@@ -91,15 +124,15 @@ public sealed class ModulesRepository
     // ── save module settings (diff apply to client DB) ───────────
     public async Task<(int inserted, int deleted)> SaveModuleSettingsAsync(SaveModuleSettingsRequest req)
     {
-        // Enabling a module copies its full row from the shared Keyline enterprise catalog
-        // (IndusEnterpriseKeyline.dbo.ModuleMaster) — the single source of truth — NOT the per-app master.
-        // The grid still lists the per-app catalog; a handful of app-only modules that don't exist in
-        // Keyline simply have no row to copy (enabling them is a no-op).
+        // Enabling a module copies its full row from the app's authoritative catalog — the SAME source the
+        // Module Settings tab lists (Estimoprime/others → IndusEnterpriseKeyline, PrintudeERP →
+        // IndusPrintudeDemo). A module with no row in that catalog simply has nothing to copy (no-op).
+        var (srcConn, srcFrom) = EnableSource(req.ApplicationName);
         var masterLookup = new Dictionary<string, IDictionary<string, object>>(StringComparer.OrdinalIgnoreCase);
-        using (var c = Keyline())
+        using (var c = srcConn)
         {
             await c.OpenAsync();
-            foreach (var row in await c.QueryAsync("SELECT * FROM dbo.ModuleMaster WHERE ISNULL(IsDeletedTransaction,0)=0"))
+            foreach (var row in await c.QueryAsync($"SELECT * FROM {srcFrom} WHERE ISNULL(IsDeletedTransaction,0)=0"))
             {
                 var dict = (IDictionary<string, object>)row;
                 var name = dict.TryGetValue("ModuleName", out var mn) ? mn?.ToString() : null;
@@ -115,6 +148,15 @@ public sealed class ModulesRepository
         var clientCols = new HashSet<string>(
             await cc.QueryAsync<string>("SELECT name FROM sys.columns WHERE object_id = OBJECT_ID('ModuleMaster')"),
             StringComparer.OrdinalIgnoreCase);
+        // NOT-NULL columns of THIS client's ModuleMaster (e.g. PrintDocumentName) that the Keyline source
+        // row may leave NULL/absent. We substitute an empty default ('' for text, 0 for numeric) so the
+        // INSERT never sends NULL to a NOT NULL column ("Cannot insert the value NULL into column ...").
+        var notNullCols = (await cc.QueryAsync(
+            @"SELECT c.name AS Name, TYPE_NAME(c.system_type_id) AS TypeName
+              FROM sys.columns c
+              WHERE c.object_id = OBJECT_ID('ModuleMaster')
+                AND c.is_nullable = 0 AND c.is_identity = 0 AND c.is_computed = 0"))
+            .Select(r => (Name: (string)r.Name, TypeName: (string?)r.TypeName)).ToList();
         var adminUserId = await cc.ExecuteScalarAsync<int?>("SELECT TOP 1 UserID FROM UserMaster WHERE UserName='admin'");
         var companyId = await cc.ExecuteScalarAsync<int?>("SELECT TOP 1 CompanyID FROM CompanyMaster WHERE IsDeletedTransaction=0") ?? 2;
         var existing = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -154,6 +196,17 @@ public sealed class ModulesRepository
 
                     // copy the Keyline row but override SetGroupIndex with the destination-computed value
                     var toInsert = new Dictionary<string, object>(mrow, StringComparer.OrdinalIgnoreCase) { ["SetGroupIndex"] = sgi };
+                    // Any NOT-NULL client column the source left NULL/absent gets an empty default ('' / 0),
+                    // so a NULL never reaches a NOT NULL column (e.g. PrintDocumentName -> '').
+                    foreach (var (colName, colType) in notNullCols)
+                    {
+                        if (colName.Equals("ModuleID", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (!toInsert.TryGetValue(colName, out var cur) || cur is null || cur is DBNull)
+                        {
+                            var def = NonNullDefaultFor(colType);
+                            if (def is not null) toInsert[colName] = def;
+                        }
+                    }
                     var newId = await InsertDynamicAsync(cc, "ModuleMaster", toInsert, exclude: new[] { "ModuleID" }, onlyColumns: clientCols);
                     if (adminUserId.HasValue)
                         await cc.ExecuteAsync($"INSERT INTO UserModuleAuthentication ({AuthCols}) VALUES ({AuthVals})",
@@ -544,6 +597,17 @@ public sealed class ModulesRepository
     }
 
     // ── dynamic insert helpers ───────────────────────────────────
+    // Empty default for a NOT NULL column whose value would otherwise be NULL: '' for text types,
+    // 0 for numeric/bit. Returns null for types we can't safely default (datetime, uniqueidentifier, …)
+    // so the caller leaves those untouched.
+    private static object? NonNullDefaultFor(string? sqlType)
+    {
+        var t = (sqlType ?? "").ToLowerInvariant();
+        if (t is "char" or "varchar" or "nchar" or "nvarchar" or "text" or "ntext" or "xml") return "";
+        if (t is "bit" or "tinyint" or "smallint" or "int" or "bigint" or "decimal" or "numeric" or "money" or "smallmoney" or "float" or "real") return 0;
+        return null;
+    }
+
     private static async Task<int> InsertDynamicAsync(SqlConnection cc, string tableInto, IDictionary<string, object> row, IEnumerable<string> exclude, IDbTransaction? tx = null, IReadOnlySet<string>? onlyColumns = null)
     {
         var ex = new HashSet<string>(exclude, StringComparer.OrdinalIgnoreCase);
