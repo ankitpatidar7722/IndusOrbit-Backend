@@ -54,6 +54,7 @@ builder.Services.AddScoped<NavRepository>();
 builder.Services.AddScoped<SubscriptionRepository>();
 builder.Services.AddScoped<ClientExceedRepository>();
 builder.Services.AddScoped<ProvisioningRepository>();
+builder.Services.AddSingleton<Indus360.Api.Repositories.ProvisioningJobStore>();
 builder.Services.AddScoped<ModulesRepository>();
 builder.Services.AddScoped<UserAdminRepository>();
 builder.Services.AddScoped<ProjectAssignmentRepository>();

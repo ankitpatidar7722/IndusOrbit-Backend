@@ -54,6 +54,99 @@ public sealed class ProvisioningRepository
         return new SqlConnection(b.ConnectionString);
     }
 
+    // Per-server folders for provisioning I/O — where a given server's new client DB files (.mdf/.ldf via
+    // RESTORE … MOVE) and its temporary .bak are written. Configured under "Provisioning:ServerPaths",
+    // keyed by host/IP; a server that isn't listed falls back to that server's own SQL default paths.
+    private IConfigurationSection ServerPaths => _cfg.GetSection("Provisioning:ServerPaths");
+
+    /// <summary>Bare host/IP used as the ServerPaths key — strips a ",port" and "\instance" suffix.</summary>
+    private static string HostKey(string? server)
+    {
+        var s = (server ?? "").Trim();
+        var comma = s.IndexOf(',');
+        if (comma >= 0) s = s[..comma];
+        var slash = s.IndexOf('\\');
+        if (slash >= 0) s = s[..slash];
+        return s.Trim();
+    }
+
+    /// <summary>
+    /// The configured folder for <paramref name="server"/>: its BackupFolder (temp .bak) when
+    /// <paramref name="backup"/> is true, else its DataFolder (.mdf/.ldf). Null when the server isn't
+    /// mapped, so the caller falls back to the SQL instance default.
+    /// </summary>
+    private string? MappedFolder(string? server, bool backup)
+    {
+        var sec = ServerPaths.GetSection(HostKey(server));
+        if (!sec.Exists()) return null;
+        var val = sec[backup ? "BackupFolder" : "DataFolder"];
+        return string.IsNullOrWhiteSpace(val) ? null : val;
+    }
+
+    /// <summary>
+    /// Resolve the folder to write to on <paramref name="conn"/>'s server: prefer the configured
+    /// provisioning folder (auto-created via xp_create_subdir — needs no xp_cmdshell); if it can't be
+    /// used on this server (e.g. the drive doesn't exist), fall back to <paramref name="instanceDefault"/>.
+    /// Always returns a path with a trailing backslash.
+    /// </summary>
+    private static async Task<string> ResolveFolderAsync(SqlConnection conn, string? configured, string instanceDefault)
+    {
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            var folder = configured.TrimEnd('\\', '/');
+            try
+            {
+                await conn.ExecuteAsync("EXEC master.dbo.xp_create_subdir @p", new { p = folder }, commandTimeout: 30);
+                return folder + "\\";
+            }
+            catch { /* drive/folder unavailable on this server — use the instance default instead */ }
+        }
+        var d = instanceDefault;
+        if (!d.EndsWith("\\") && !d.EndsWith("/")) d += "\\";
+        return d;
+    }
+
+    /// <summary>
+    /// Run a long BACKUP/RESTORE on <paramref name="execConn"/> while polling its live percent_complete
+    /// (through a second connection to <paramref name="monitorServer"/>) and reporting an overall
+    /// percentage scaled into [<paramref name="pctFrom"/>, <paramref name="pctTo"/>]. Monitoring is
+    /// best-effort and never fails the operation; the command's own result/exception is awaited.
+    /// </summary>
+    private async Task ExecWithProgressAsync(SqlConnection execConn, string sql, int cmdTimeout,
+        string monitorServer, string stage, int pctFrom, int pctTo, string label, Action<string, int, string>? report)
+    {
+        var spid = await execConn.ExecuteScalarAsync<int>("SELECT @@SPID");
+        var exec = execConn.ExecuteAsync(sql, commandTimeout: cmdTimeout);
+        if (report is not null)
+        {
+            SqlConnection? mon = null;
+            try
+            {
+                mon = MasterConnection(monitorServer);
+                await mon.OpenAsync();
+                while (true)
+                {
+                    var finished = await Task.WhenAny(exec, Task.Delay(1500));
+                    if (finished == exec) break;
+                    try
+                    {
+                        var pc = await mon.ExecuteScalarAsync<double?>(
+                            "SELECT percent_complete FROM sys.dm_exec_requests WHERE session_id=@s", new { s = spid });
+                        if (pc is > 0)
+                        {
+                            var overall = pctFrom + (int)Math.Round((pctTo - pctFrom) * (pc.Value / 100.0));
+                            report(stage, Math.Clamp(overall, pctFrom, pctTo), $"{label} {(int)pc.Value}%");
+                        }
+                    }
+                    catch { /* monitoring is best-effort */ }
+                }
+            }
+            catch { /* couldn't open the monitor connection — just wait for the command */ }
+            finally { if (mon is not null) await mon.DisposeAsync(); }
+        }
+        await exec;   // observe completion / propagate any error
+    }
+
     // ── 1. Servers ────────────────────────────────────────────────
     public List<string> GetServers()
     {
@@ -73,8 +166,9 @@ public sealed class ProvisioningRepository
     }
 
     // ── 3. Setup database (BACKUP source template → RESTORE new client DB) ──
-    public async Task<SetupDatabaseResponse> SetupDatabaseAsync(SetupDatabaseRequest req)
+    public async Task<SetupDatabaseResponse> SetupDatabaseAsync(SetupDatabaseRequest req, Action<string, int, string>? report = null)
     {
+        void Report(string stage, int pct, string msg) => report?.Invoke(stage, pct, msg);
         var fail = (string m) => new SetupDatabaseResponse { Success = false, Message = m };
 
         if (string.IsNullOrWhiteSpace(req.Server) || string.IsNullOrWhiteSpace(req.ApplicationName)
@@ -111,17 +205,20 @@ public sealed class ProvisioningRepository
         await using (var sconn = MasterConnection(sourceServer))
         {
             await sconn.OpenAsync();
-            var backupDir = await sconn.ExecuteScalarAsync<string>(
+            var defBackupDir = await sconn.ExecuteScalarAsync<string>(
                 "SELECT CAST(SERVERPROPERTY('InstanceDefaultBackupPath') AS NVARCHAR(500))")
                 ?? await sconn.ExecuteScalarAsync<string>(
                     "SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS NVARCHAR(500))")
                 ?? @"C:\Temp\";
-            if (!backupDir.EndsWith("\\")) backupDir += "\\";
+            // Stage the .bak in this source server's configured BackupFolder (keeps it off a near-full C:);
+            // falls back to the server's default backup path if that folder isn't available.
+            var backupDir = await ResolveFolderAsync(sconn, MappedFolder(sourceServer, backup: true), defBackupDir);
             backupPath = $"{backupDir}{newDbName}_{DateTime.Now:yyyyMMddHHmmss}.bak";
 
-            await sconn.ExecuteAsync(
+            Report("backup", 4, "Backing up template…");
+            await ExecWithProgressAsync(sconn,
                 $"BACKUP DATABASE [{sourceDb}] TO DISK = N'{backupPath}' WITH FORMAT, INIT, SKIP, NOUNLOAD, STATS = 10",
-                commandTimeout: 600);
+                600, sourceServer, "backup", 5, sourceServer != targetServer ? 35 : 48, "Backing up template…", report);
         }
 
         // D) Make the .bak reachable by the TARGET server.
@@ -147,12 +244,14 @@ public sealed class ProvisioningRepository
             if (isCrossServer)
             {
                 // Where the transferred .bak will land on the target (its own default backup folder).
-                var tgtBackupDir = await tconn.ExecuteScalarAsync<string>(
+                var defTgtBackupDir = await tconn.ExecuteScalarAsync<string>(
                     "SELECT CAST(SERVERPROPERTY('InstanceDefaultBackupPath') AS NVARCHAR(500))") ?? @"C:\Temp";
-                var winSep = !tgtBackupDir.Contains('/');
-                targetBak = tgtBackupDir.TrimEnd('\\', '/') + (winSep ? "\\" : "/") + $"{newDbName}_{DateTime.Now:yyyyMMddHHmmss}.bak";
+                // Land the transferred .bak in the target server's configured BackupFolder (off a full C:).
+                var tgtBackupDir = await ResolveFolderAsync(tconn, MappedFolder(targetServer, backup: true), defTgtBackupDir);
+                targetBak = tgtBackupDir + $"{newDbName}_{DateTime.Now:yyyyMMddHHmmss}.bak";
 
                 // 1) pull the .bak bytes off the source through its connection
+                Report("transfer", 38, "Downloading template backup…");
                 byte[] bakBytes;
                 await using (var read = MasterConnection(sourceServer))
                 {
@@ -165,6 +264,7 @@ public sealed class ProvisioningRepository
                         return fail("Could not read the backup file back from the source server.");
                     bakBytes = (byte[])blob;
                 }
+                Report("transfer", 52, $"Uploading backup to target ({bakBytes.Length / (1024 * 1024)} MB)…");
 
                 // 2) best-effort: enable OLE Automation on the target (Windows SQL). If it can't be enabled
                 //    (e.g. SQL on Linux), the write below throws with a clear message.
@@ -209,12 +309,14 @@ public sealed class ProvisioningRepository
 
             var files = (await tconn.QueryAsync($"RESTORE FILELISTONLY FROM DISK = N'{restorePath}'", commandTimeout: 120)).ToList();
 
-            var dataPath = await tconn.ExecuteScalarAsync<string>(
+            var defDataPath = await tconn.ExecuteScalarAsync<string>(
                 "SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS NVARCHAR(500))") ?? @"C:\SQLData\";
-            var logPath = await tconn.ExecuteScalarAsync<string>(
-                "SELECT CAST(SERVERPROPERTY('InstanceDefaultLogPath') AS NVARCHAR(500))") ?? dataPath;
-            if (!dataPath.EndsWith("\\")) dataPath += "\\";
-            if (!logPath.EndsWith("\\")) logPath += "\\";
+            var defLogPath = await tconn.ExecuteScalarAsync<string>(
+                "SELECT CAST(SERVERPROPERTY('InstanceDefaultLogPath') AS NVARCHAR(500))") ?? defDataPath;
+            // Place the new DB's .mdf/.ndf and .ldf in the target server's configured DataFolder (e.g.
+            // D:\Indus Databases); falls back to the server's default data/log paths if it isn't available.
+            var dataPath = await ResolveFolderAsync(tconn, MappedFolder(targetServer, backup: false), defDataPath);
+            var logPath = await ResolveFolderAsync(tconn, MappedFolder(targetServer, backup: false), defLogPath);
 
             var move = new StringBuilder();
             var dataIdx = 0;
@@ -236,10 +338,13 @@ public sealed class ProvisioningRepository
                 move.Append($", MOVE N'{logical}' TO N'{physical}'");
             }
 
-            await tconn.ExecuteAsync(
+            Report("restore", isCrossServer ? 62 : 50, "Restoring database…");
+            await ExecWithProgressAsync(tconn,
                 $"RESTORE DATABASE [{newDbName}] FROM DISK = N'{restorePath}' WITH REPLACE{move}",
-                commandTimeout: 600);
+                600, targetServer, "restore", isCrossServer ? 62 : 50, 97, "Restoring database…", report);
         }
+
+        Report("finalize", 98, "Finalizing…");
 
         // F) best-effort cleanup of the .bak files (non-critical). xp_delete_file needs no xp_cmdshell.
         try
