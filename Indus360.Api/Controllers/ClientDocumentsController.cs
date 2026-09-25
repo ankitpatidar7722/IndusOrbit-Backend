@@ -121,4 +121,19 @@ public sealed class ClientDocumentsController : ControllerBase
             return StatusCode(500, "Could not render the PDF.");
         return File(bytes, "application/pdf", "document.pdf");
     }
+
+    /// <summary>Render document HTML to a single full-page PNG at the client-measured size — used by the
+    /// exact-look Word export (the client slices it into A4 pages). 503 when no server browser is available.</summary>
+    [HttpPost("render-png")]
+    public async Task<IActionResult> RenderPng([FromBody] RenderPngRequest req)
+    {
+        if (string.IsNullOrWhiteSpace(req?.HtmlContent))
+            return BadRequest("Document content is empty.");
+        if (!_pdf.IsAvailable)
+            return StatusCode(503, "Rendering is unavailable (no browser found on the server).");
+        var bytes = await _pdf.RenderPngAsync(req.HtmlContent, req.Width, req.Height);
+        if (bytes is null || bytes.Length == 0)
+            return StatusCode(500, "Could not render the image.");
+        return File(bytes, "image/png", "document.png");
+    }
 }

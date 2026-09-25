@@ -42,6 +42,14 @@ public sealed class RenderPdfRequest
     public string HtmlContent { get; set; } = "";
 }
 
+/// <summary>Render document HTML to a full-page PNG at a given pixel size (for the exact-look Word export).</summary>
+public sealed class RenderPngRequest
+{
+    public string HtmlContent { get; set; } = "";
+    public int Width { get; set; }
+    public int Height { get; set; }
+}
+
 /// <summary>One audit-log entry for a client document: a Save or an Email, with who + when.</summary>
 public sealed class ClientDocumentHistoryDto
 {

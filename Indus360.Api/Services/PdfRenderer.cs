@@ -78,6 +78,73 @@ public sealed class PdfRenderer
         finally { try { Directory.Delete(dir, true); } catch { /* best-effort cleanup */ } }
     }
 
+    /// <summary>
+    /// HTML → a single full-page PNG at the given pixel size, or null on failure. Used by the
+    /// "exact-look" Word export: the browser screenshots the document exactly as it renders, then the
+    /// client slices the PNG into A4 pages and embeds each as an image. Window size = the client-measured
+    /// content size so the whole document is captured with no extra whitespace; 2× device scale for crispness.
+    /// </summary>
+    public async Task<byte[]?> RenderPngAsync(string html, int width, int height, CancellationToken ct = default)
+    {
+        if (_browser is null || string.IsNullOrWhiteSpace(html)) return null;
+
+        const string forceColor = "<style>*{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important;}</style>";
+        html = html.Contains("</head>", StringComparison.OrdinalIgnoreCase)
+            ? html.Replace("</head>", forceColor + "</head>", StringComparison.OrdinalIgnoreCase)
+            : forceColor + html;
+
+        width = Math.Clamp(width <= 0 ? 800 : width, 320, 2400);
+        height = Math.Clamp(height <= 0 ? 1123 : height, 200, 30000);
+
+        var dir = Path.Combine(Path.GetTempPath(), "indus360-png", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var inPath = Path.Combine(dir, "doc.html");
+        var outPath = Path.Combine(dir, "doc.png");
+        try
+        {
+            await File.WriteAllTextAsync(inPath, html, new UTF8Encoding(false), ct);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = _browser,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+            };
+            foreach (var a in new[]
+            {
+                "--headless=new",
+                "--disable-gpu",
+                "--no-sandbox",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-extensions",
+                "--hide-scrollbars",
+                "--run-all-compositor-stages-before-draw",
+                "--virtual-time-budget=8000",
+                "--force-device-scale-factor=2",
+                $"--window-size={width},{height}",
+                $"--screenshot={outPath}",
+                new Uri(inPath).AbsoluteUri,
+            }) psi.ArgumentList.Add(a);
+
+            using var proc = Process.Start(psi);
+            if (proc is null) return null;
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(40));
+            try { await proc.WaitForExitAsync(timeout.Token); }
+            catch (OperationCanceledException) { try { proc.Kill(true); } catch { /* ignore */ } return null; }
+
+            if (!File.Exists(outPath)) return null;
+            var bytes = await File.ReadAllBytesAsync(outPath, ct);
+            return bytes.Length > 0 ? bytes : null;
+        }
+        catch { return null; }
+        finally { try { Directory.Delete(dir, true); } catch { /* best-effort cleanup */ } }
+    }
+
     /// <summary>First installed Chromium browser found, or null. Override with INDUS360_CHROME.</summary>
     private static string? FindBrowser()
     {
