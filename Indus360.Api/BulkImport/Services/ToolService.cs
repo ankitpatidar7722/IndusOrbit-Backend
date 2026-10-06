@@ -307,10 +307,9 @@ public class ToolService : IToolService
 
         if (toolGroupId == 3) // DIE
         {
-            // Per requirement: SizeL/SizeW/SizeH/UpsAround/UpsAcross/TotalUps are NOT mandatory for DIE
-            // (blank or 0 are both accepted) — removed from the Missing validation.
             requiredFields = new[] {
-                "ToolName", "ProductHSNName",
+                "ToolName", "SizeL", "SizeW", "SizeH",
+                "UpsAround", "UpsAcross", "TotalUps", "ProductHSNName",
                 "PurchaseUnit", "PurchaseRate", "StockUnit"
             };
         }
@@ -356,6 +355,12 @@ public class ToolService : IToolService
                 "StockUnit", "ProductHSNName", "TotalUps"
             };
         }
+
+        // Per requirement: Size & Ups fields are OPTIONAL for EVERY tool group (blank or 0 both
+        // accepted) — strip them from whichever group's required set so they never flag "Missing".
+        var sizeUpsOptional = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "SizeL", "SizeW", "SizeH", "UpsAround", "UpsAcross", "TotalUps" };
+        requiredFields = requiredFields.Where(f => !sizeUpsOptional.Contains(f)).ToArray();
 
         // Cache reflection data outside the loop for performance
         var stringProperties = typeof(ToolMasterDto)
