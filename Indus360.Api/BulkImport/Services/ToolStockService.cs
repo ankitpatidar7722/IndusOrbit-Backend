@@ -552,16 +552,19 @@ public class ToolStockService : IToolStockService
 
         // â”€â”€â”€ 1. Fetch lookup data â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         var toolLookup = await _connection.QueryAsync<dynamic>(
-            @"SELECT t.ToolID, t.ToolName, t.ToolGroupID, tg.ToolGroupName
-              FROM ToolMaster t
-              LEFT JOIN ToolGroupMaster tg ON t.ToolGroupID = tg.ToolGroupID
+            @"SELECT t.ToolID, t.ToolName, t.ToolCode, t.ToolGroupID, tg.ToolGroupName
+              FROM ToolMaster t WITH (NOLOCK)
+              LEFT JOIN ToolGroupMaster tg WITH (NOLOCK) ON t.ToolGroupID = tg.ToolGroupID
               WHERE ISNULL(t.IsDeletedTransaction, 0) = 0");
 
         var validToolCodeKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var tool in toolLookup)
         {
-            string groupName = tool.ToolGroupName?.ToString() ?? "";
-            string toolCode = tool.ToolCode?.ToString() ?? "";
+            // Trim both parts so a stray space in the master data can't cause a false "Mismatch"
+            // (the row side is trimmed too, below). ToolCode MUST be selected above or every key is
+            // built empty and every row falsely flags as a ToolCode mismatch.
+            string groupName = (tool.ToolGroupName?.ToString() ?? "").Trim();
+            string toolCode = (tool.ToolCode?.ToString() ?? "").Trim();
             if (!string.IsNullOrEmpty(toolCode))
                 validToolCodeKeys.Add($"{groupName}|{toolCode}");
         }
@@ -569,12 +572,12 @@ public class ToolStockService : IToolStockService
         // Tool group names
         var toolGroupLookup = await _connection.QueryAsync<dynamic>(
             @"SELECT ToolGroupID, ToolGroupName
-              FROM ToolGroupMaster
+              FROM ToolGroupMaster WITH (NOLOCK)
               WHERE ISNULL(IsDeletedTransaction, 0) = 0");
         var validGroupNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var g in toolGroupLookup)
         {
-            string gName = g.ToolGroupName?.ToString() ?? "";
+            string gName = (g.ToolGroupName?.ToString() ?? "").Trim();
             if (!string.IsNullOrEmpty(gName))
                 validGroupNames.Add(gName);
         }
@@ -582,14 +585,14 @@ public class ToolStockService : IToolStockService
         // Fetch distinct warehouse names
         var warehouseNames = await _connection.QueryAsync<string>(
             @"SELECT DISTINCT LTRIM(RTRIM(WarehouseName)) AS WarehouseName
-              FROM WarehouseMaster
+              FROM WarehouseMaster WITH (NOLOCK)
               WHERE ISNULL(IsDeletedTransaction, 0) = 0");
         var validWarehouses = new HashSet<string>(warehouseNames, StringComparer.OrdinalIgnoreCase);
 
         // Fetch warehouse â†’ bin mapping
         var warehouseBins = await _connection.QueryAsync<dynamic>(
             @"SELECT LTRIM(RTRIM(WarehouseName)) AS WarehouseName, LTRIM(RTRIM(BinName)) AS BinName
-              FROM WarehouseMaster
+              FROM WarehouseMaster WITH (NOLOCK)
               WHERE ISNULL(IsDeletedTransaction, 0) = 0");
         var binsByWarehouse = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
         foreach (var wb in warehouseBins)
