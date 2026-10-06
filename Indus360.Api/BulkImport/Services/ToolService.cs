@@ -307,9 +307,10 @@ public class ToolService : IToolService
 
         if (toolGroupId == 3) // DIE
         {
+            // Per requirement: SizeL/SizeW/SizeH/UpsAround/UpsAcross/TotalUps are NOT mandatory for DIE
+            // (blank or 0 are both accepted) — removed from the Missing validation.
             requiredFields = new[] {
-                "ToolName", "SizeL", "SizeW", "SizeH",
-                "UpsAround", "UpsAcross", "TotalUps", "ProductHSNName",
+                "ToolName", "ProductHSNName",
                 "PurchaseUnit", "PurchaseRate", "StockUnit"
             };
         }
