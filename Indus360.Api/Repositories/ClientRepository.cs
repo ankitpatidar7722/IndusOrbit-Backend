@@ -338,6 +338,61 @@ public sealed class ClientRepository
     }
     public async Task<bool> DeleteChangeRequestAsync(int id, int? userId) => await DeleteAsync("ChangeRequests", id, userId);
 
+    // ---------------- Communication Log ----------------
+    /// <summary>Unified interaction timeline for a client: manual CommunicationLog entries PLUS the
+    /// emails already sent to this client (from app.EmailHistory, read-only), newest first.</summary>
+    public async Task<List<CommunicationEntryDto>> GetCommunicationsAsync(string code)
+    {
+        await using var db = await _db.OpenAsync();
+        var p = new { code };
+        var list = (await db.QueryAsync<CommunicationEntryDto>(@"
+            SELECT c.Id, 'log' AS Source, CAST(1 AS bit) AS Editable, c.CommDateTime AS [When],
+                   c.Mode, c.Direction, c.ContactPerson, c.ContactInfo, c.Outcome, c.DurationMinutes,
+                   c.[Subject], c.Notes, c.FollowUpDate, c.HandledBy,
+                   u.FullName AS LoggedBy, c.CreatedDate AS LoggedAt
+            FROM app.CommunicationLog c WITH (NOLOCK)
+            LEFT JOIN app.Users u WITH (NOLOCK) ON u.UserId = c.CreatedBy
+            WHERE c.ClientCode=@code AND ISNULL(c.IsDeletedTransaction,0)=0", p)).ToList();
+
+        // Best-effort: fold in emails already sent to this client (read-only — can't be edited here).
+        try
+        {
+            var emails = await db.QueryAsync<CommunicationEntryDto>(@"
+                SELECT TOP 200 Id, 'email' AS Source, CAST(0 AS bit) AS Editable, SentAt AS [When],
+                       'Email' AS Mode, 'Outbound' AS Direction, ClientName AS ContactPerson,
+                       Recipients AS ContactInfo, ISNULL(NULLIF(Status,''),'Sent') AS Outcome,
+                       CAST(NULL AS int) AS DurationMinutes, [Subject], CAST(NULL AS nvarchar(max)) AS Notes,
+                       CAST(NULL AS nvarchar(20)) AS FollowUpDate, SentByName AS HandledBy,
+                       SentByName AS LoggedBy, SentAt AS LoggedAt
+                FROM app.EmailHistory WITH (NOLOCK)
+                WHERE ClientCode=@code", p);
+            list.AddRange(emails);
+        }
+        catch { /* email history unavailable → show the manual log alone */ }
+
+        return list.OrderByDescending(x => x.When ?? x.LoggedAt ?? DateTime.MinValue).ToList();
+    }
+
+    public async Task<int> AddCommunicationAsync(CommunicationLog c)
+    {
+        const string sql = @"INSERT INTO app.CommunicationLog
+            (ClientCode,CommDateTime,Mode,Direction,ContactPerson,ContactInfo,Outcome,DurationMinutes,[Subject],Notes,FollowUpDate,HandledBy,CreatedBy)
+            OUTPUT INSERTED.Id VALUES
+            (@ClientCode,@CommDateTime,@Mode,@Direction,@ContactPerson,@ContactInfo,@Outcome,@DurationMinutes,@Subject,@Notes,@FollowUpDate,@HandledBy,@CreatedBy);";
+        await using var db = await _db.OpenAsync();
+        return await db.ExecuteScalarAsync<int>(sql, c);
+    }
+    public async Task<bool> UpdateCommunicationAsync(CommunicationLog c)
+    {
+        const string sql = @"UPDATE app.CommunicationLog SET
+            CommDateTime=@CommDateTime,Mode=@Mode,Direction=@Direction,ContactPerson=@ContactPerson,ContactInfo=@ContactInfo,
+            Outcome=@Outcome,DurationMinutes=@DurationMinutes,[Subject]=@Subject,Notes=@Notes,FollowUpDate=@FollowUpDate,HandledBy=@HandledBy,
+            ModifiedBy=@ModifiedBy,ModifiedDate=SYSDATETIME() WHERE Id=@Id AND ISNULL(IsDeletedTransaction,0)=0;";
+        await using var db = await _db.OpenAsync();
+        return await db.ExecuteAsync(sql, c) > 0;
+    }
+    public async Task<bool> DeleteCommunicationAsync(int id, int? userId) => await DeleteAsync("CommunicationLog", id, userId);
+
     // A /clients Application → the matching Point Management product name (same map as Add Point).
     private static string MapAppToProduct(string? app) => (app ?? "").Trim().ToLowerInvariant() switch
     {

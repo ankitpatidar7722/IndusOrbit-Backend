@@ -113,6 +113,52 @@ public class ChangeRequest : AuditFields
     public string? Summary { get; set; }            // AI (Gemini) generated summary of this row
 }
 
+/// <summary>
+/// One logged interaction between Indus and the client during implementation — call / email /
+/// WhatsApp / meeting, with its outcome (Connected, No Answer, …) so nothing can be disputed later.
+/// Keyed by ClientCode; soft-deleted via IsDeletedTransaction. The "who logged it + when" audit
+/// fields are server-set and never edited.
+/// </summary>
+public class CommunicationLog : AuditFields
+{
+    public int Id { get; set; }
+    public string ClientCode { get; set; } = "";
+    public DateTime? CommDateTime { get; set; }            // when the interaction actually happened
+    public string Mode { get; set; } = "Call";             // Call / Email / WhatsApp / Meeting / SMS / Video
+    public string Direction { get; set; } = "Outbound";    // Outbound (Indus→client) / Inbound (client→Indus)
+    public string? ContactPerson { get; set; }             // client-side person
+    public string? ContactInfo { get; set; }               // phone / email
+    public string Outcome { get; set; } = "Connected";     // Connected / No Answer / Busy / Call Back / Resolved / Pending
+    public int? DurationMinutes { get; set; }
+    public string? Subject { get; set; }
+    public string? Notes { get; set; }                     // what was discussed
+    public string? FollowUpDate { get; set; }              // next action date (yyyy-MM-dd)
+    public string? HandledBy { get; set; }                 // Indus-side person (auto = logged-in user)
+}
+
+/// <summary>A unified Communication-Log timeline row: a manual CommunicationLog entry OR an auto-pulled
+/// email from app.EmailHistory. Emails are read-only (Editable=false) so the same record is shown to
+/// both sides without letting either edit a sent email.</summary>
+public class CommunicationEntryDto
+{
+    public int Id { get; set; }
+    public string Source { get; set; } = "log";            // "log" | "email"
+    public bool Editable { get; set; } = true;
+    public DateTime? When { get; set; }
+    public string Mode { get; set; } = "Call";
+    public string Direction { get; set; } = "Outbound";
+    public string? ContactPerson { get; set; }
+    public string? ContactInfo { get; set; }
+    public string? Outcome { get; set; }
+    public int? DurationMinutes { get; set; }
+    public string? Subject { get; set; }
+    public string? Notes { get; set; }
+    public string? FollowUpDate { get; set; }
+    public string? HandledBy { get; set; }
+    public string? LoggedBy { get; set; }                  // display name of who recorded it
+    public DateTime? LoggedAt { get; set; }                // audit: when it was recorded
+}
+
 public class SupportLog : AuditFields
 {
     public int Id { get; set; }

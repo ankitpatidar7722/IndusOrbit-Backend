@@ -116,6 +116,21 @@ public class ClientsController : ControllerBase
     [HttpDelete("{code}/changerequests/{id:int}")]
     public async Task<IActionResult> DeleteCr(int id) => await _repo.DeleteChangeRequestAsync(id, this.CurrentUserId()) ? NoContent() : NotFound();
 
+    // -------- Communication Log (call / email / WhatsApp / meeting interactions with the client) --------
+    [HttpGet("{code}/communications")]
+    public async Task<IActionResult> GetCommunications(string code) => Ok(await _repo.GetCommunicationsAsync(code));
+
+    [HttpPost("{code}/communications")]
+    public async Task<IActionResult> AddCommunication(string code, [FromBody] CommunicationLog c)
+    { c.ClientCode = code; c.CreatedBy = this.CurrentUserId(); c.Id = await _repo.AddCommunicationAsync(c); return Ok(c); }
+
+    [HttpPut("{code}/communications/{id:int}")]
+    public async Task<IActionResult> UpdateCommunication(string code, int id, [FromBody] CommunicationLog c)
+    { c.Id = id; c.ClientCode = code; c.ModifiedBy = this.CurrentUserId(); return await _repo.UpdateCommunicationAsync(c) ? Ok(c) : NotFound(); }
+
+    [HttpDelete("{code}/communications/{id:int}")]
+    public async Task<IActionResult> DeleteCommunication(int id) => await _repo.DeleteCommunicationAsync(id, this.CurrentUserId()) ? NoContent() : NotFound();
+
     public sealed class ToWorklogRequest { public string? ClientName { get; set; } }
 
     /// <summary>"Send To → Task": append a Tracker row (entity = milestone | training | changerequest)
