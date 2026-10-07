@@ -520,7 +520,7 @@ public class ItemService : IItemService
                            string.Equals(thicknessA, thicknessB, StringComparison.OrdinalIgnoreCase) &&
                            string.Equals(stockRefA, stockRefB, StringComparison.OrdinalIgnoreCase);
                 }
-                else if (itemGroupId == 6) // FOIL: Quality + SizeW + Thickness
+                else if (itemGroupId == 6) // FOIL: Quality + SizeW + Thickness + Manufacturer
                 {
                     var qualityA = a.Quality?.Trim() ?? "";
                     var qualityB = b.Quality?.Trim() ?? "";
@@ -531,9 +531,15 @@ public class ItemService : IItemService
                     var thicknessA = a.Thickness?.ToString() ?? "";
                     var thicknessB = b.Thickness?.ToString() ?? "";
 
+                    // Manufacturer is part of the FOIL key too, so the same foil in the same
+                    // size/thickness from a DIFFERENT manufacturer is NOT treated as a duplicate.
+                    var manufA = a.Manufecturer?.Trim() ?? "";
+                    var manufB = b.Manufecturer?.Trim() ?? "";
+
                     return string.Equals(qualityA, qualityB, StringComparison.OrdinalIgnoreCase) &&
                            string.Equals(sizeWA, sizeWB, StringComparison.OrdinalIgnoreCase) &&
-                           string.Equals(thicknessA, thicknessB, StringComparison.OrdinalIgnoreCase);
+                           string.Equals(thicknessA, thicknessB, StringComparison.OrdinalIgnoreCase) &&
+                           string.Equals(manufA, manufB, StringComparison.OrdinalIgnoreCase);
                 }
                 else if (itemGroupId == 7) // SHIPPER CARTON: Quality + ItemSubGroupName + NoOfPly + SizeL + SizeW + SizeH
                 {
