@@ -26,6 +26,8 @@ builder.Services.AddControllers(o =>
         // Route the folded-in BulkImport controllers under /bulk/... so they don't collide
         // with Indus360's own /api/... controllers (both ship Auth/Health/Keyline/MessageFormat).
         o.Conventions.Add(new BulkImportRoutePrefixConvention());
+        // Global audit trail — auto-records every mutating request (see AuditActionFilter).
+        o.Filters.AddService<Indus360.Api.Filters.AuditActionFilter>();
     })
     .AddJsonOptions(options =>
     {
@@ -77,6 +79,9 @@ builder.Services.AddScoped<TmsAdminRepository>();
 builder.Services.AddScoped<NotificationRepository>();
 builder.Services.AddScoped<TemplateStatusRepository>();
 builder.Services.AddScoped<SopStatusRepository>();
+builder.Services.AddScoped<AuditLogRepository>();
+builder.Services.AddScoped<LoginSessionRepository>();
+builder.Services.AddScoped<Indus360.Api.Filters.AuditActionFilter>();
 builder.Services.AddScoped<AttachmentRepository>();
 // Client Kick-Off / Sign-Off finalized documents (save / view / download)
 builder.Services.AddScoped<ClientDocumentRepository>();

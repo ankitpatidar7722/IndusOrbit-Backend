@@ -1,6 +1,7 @@
 using Dapper;
 using Indus360.Api.Data;
 using Indus360.Api.Models;
+using Indus360.Api.Services;
 
 namespace Indus360.Api.Repositories;
 
@@ -28,16 +29,22 @@ public sealed class TmsAdminRepository
         await using var db = await _db.OpenTmsAsync();
         if (u.UserID > 0)
         {
+            // Hash only when a new password is supplied; an empty value keeps the existing hash (CASE below).
+            var hashed = string.IsNullOrEmpty(u.Password) ? "" : PasswordHasher.Hash(u.Password);
             await db.ExecuteAsync(@"
                 UPDATE app.Users SET FullName=@FullName, Email=@Email, Role=@Role, IsActive=@IsActive, Mobile=@WhatsAppNumber,
-                    PasswordHash = CASE WHEN @Password IS NOT NULL AND @Password <> '' THEN @Password ELSE PasswordHash END
-                WHERE UserId=@UserID", u);
+                    PasswordHash = CASE WHEN @Password <> '' THEN @Password ELSE PasswordHash END
+                WHERE UserId=@UserID",
+                new { u.FullName, u.Email, u.Role, u.IsActive, u.WhatsAppNumber, u.UserID, Password = hashed });
             return u.UserID;
         }
+        // New user: hash the supplied password, or the default 'indus@123' when none was given.
+        var newHash = PasswordHasher.Hash(string.IsNullOrEmpty(u.Password) ? "indus@123" : u.Password);
         return await db.ExecuteScalarAsync<int>(@"
             INSERT INTO app.Users (FullName, Email, PasswordHash, Role, IsActive, Mobile, CompanyId, ProductionUnitId, FYear, CreatedAt)
             OUTPUT INSERTED.UserId
-            VALUES (@FullName, @Email, COALESCE(NULLIF(@Password,''),'indus@123'), @Role, @IsActive, @WhatsAppNumber, 1, 1, '2026-2027', SYSDATETIME())", u);
+            VALUES (@FullName, @Email, @Password, @Role, @IsActive, @WhatsAppNumber, 1, 1, '2026-2027', SYSDATETIME())",
+            new { u.FullName, u.Email, u.Role, u.IsActive, u.WhatsAppNumber, Password = newHash });
     }
 
     public async Task SetUserActiveAsync(int userId, bool active)

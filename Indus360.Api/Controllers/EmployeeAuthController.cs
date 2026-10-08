@@ -1,14 +1,15 @@
 using Dapper;
 using Indus360.Api.Data;
 using Indus360.Api.Models;
+using Indus360.Api.Services;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Indus360.Api.Controllers;
 
 /// <summary>
 /// Login against the consolidated app.Users table (Employee HR data merged in — Users
-/// is the single source of truth). Username = Email, password compared against
-/// Users.PasswordHash (plain-text — recommend BCrypt later). Only active users may
+/// is the single source of truth). Username = Email, password verified against
+/// Users.PasswordHash (BCrypt; legacy plain-text accepted + lazily upgraded on login). Only active users may
 /// sign in. Returns the app identity (appUser) so the frontend opens the full app +
 /// sidebar, plus the HR profile fields (kept under "employee" for the portal page).
 /// </summary>
@@ -71,8 +72,12 @@ public sealed class EmployeeAuthController : ControllerBase
                 return Unauthorized(new { success = false, message = "Invalid email or password." });
             if (u.IsActive != true)
                 return Unauthorized(new { success = false, message = "This account is inactive. Please contact your administrator." });
-            if (!string.Equals((u.PasswordHash ?? "").Trim(), password, StringComparison.Ordinal))
+            if (!PasswordHasher.Verify(password, (u.PasswordHash ?? "").Trim()))
                 return Unauthorized(new { success = false, message = "Invalid email or password." });
+            // Lazy migration: upgrade a legacy plain-text password to a BCrypt hash on first successful login.
+            if (!PasswordHasher.IsHashed((u.PasswordHash ?? "").Trim()))
+                await c.ExecuteAsync("UPDATE app.Users SET PasswordHash = @h WHERE UserId = @id",
+                    new { h = PasswordHasher.Hash(password), id = u.UserId });
 
             var appUser = new SessionUser
             {

@@ -1,6 +1,7 @@
 using System.Data;
 using Dapper;
 using Indus360.Api.Models;
+using Indus360.Api.Services;
 using Microsoft.Data.SqlClient;
 
 namespace Indus360.Api.Repositories;
@@ -64,7 +65,7 @@ public sealed class ModulesRepository
         _ => (Keyline(), "dbo.ModuleMaster"),
     };
 
-    private sealed class AppUserAuth { public long UserId { get; set; } public string? FullName { get; set; } public string? Email { get; set; } }
+    private sealed class AppUserAuth { public long UserId { get; set; } public string? FullName { get; set; } public string? Email { get; set; } public string? PasswordHash { get; set; } }
     private static SqlConnection Client(string cs)
         => new(new SqlConnectionStringBuilder(cs) { TrustServerCertificate = true, ConnectTimeout = 30 }.ConnectionString);
 
@@ -401,15 +402,16 @@ public sealed class ModulesRepository
         {
             await app.OpenAsync();
             actor = await app.QuerySingleOrDefaultAsync<AppUserAuth>(@"
-                SELECT TOP 1 UserId, FullName, Email
+                SELECT TOP 1 UserId, FullName, Email, PasswordHash
                 FROM app.Users
                 WHERE (Email = @u OR FullName = @u)
-                  AND PasswordHash = @p
                   AND IsActive = 1
                   AND ISNULL(IsDeletedTransaction,0) = 0
-                ORDER BY UserId", new { u = req.UserName, p = req.Password });
+                ORDER BY UserId", new { u = req.UserName });
         }
-        if (actor is null) throw new Exception("Invalid Username or Password.");
+        // Verify in C# — stored passwords are BCrypt hashes (can't be matched in a SQL WHERE); legacy plain accepted.
+        if (actor is null || !PasswordHasher.Verify(req.Password, actor.PasswordHash))
+            throw new Exception("Invalid Username or Password.");
 
         // 2) Delete the group from the control DB (ModuleGroupMaster).
         int deleted;

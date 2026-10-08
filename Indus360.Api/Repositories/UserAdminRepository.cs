@@ -2,6 +2,7 @@ using System.Data;
 using Dapper;
 using Indus360.Api.Data;
 using Indus360.Api.Models;
+using Indus360.Api.Services;
 using Microsoft.Data.SqlClient;
 
 namespace Indus360.Api.Repositories;
@@ -103,7 +104,7 @@ public sealed class UserAdminRepository
               (@FullName, @Email, @Password, @Role, @Mobile, @ReportingManagerId, @IsActive, SYSDATETIME(), @CompanyId, ISNULL(@pu,0), ISNULL(@fy,'2026-2027'), ISNULL(@cu,''), ISNULL(@cp,''),
                @EmailProvider, @SmtpUsername, @SmtpPassword, @SmtpServer, @SmtpPort, @SmtpAuthenticate, @SmtpUseSSL, @EmailSignature, @CreatedBy, SYSDATETIME());
             SELECT CAST(SCOPE_IDENTITY() AS bigint);",
-            new { r.FullName, r.Email, Password = r.Password ?? "", r.Role, r.Mobile, r.ReportingManagerId, r.IsActive, r.CompanyId,
+            new { r.FullName, r.Email, Password = string.IsNullOrEmpty(r.Password) ? "" : PasswordHasher.Hash(r.Password), r.Role, r.Mobile, r.ReportingManagerId, r.IsActive, r.CompanyId,
                   r.EmailProvider, r.SmtpUsername, r.SmtpPassword, r.SmtpServer, r.SmtpPort, r.SmtpAuthenticate, r.SmtpUseSSL, r.EmailSignature, CreatedBy = actingUserId });
         await SyncTmsUserAsync(c, newId);   // mirror into the TMS dbo.Users (Point Management identity)
         return newId;
@@ -150,7 +151,8 @@ public sealed class UserAdminRepository
                 {(setPwd ? ", PasswordHash=@Password" : "")}
                 {(setSmtpPwd ? ", SmtpPassword=@SmtpPassword" : "")}
             WHERE UserId=@UserId",
-            new { r.UserId, r.FullName, r.Email, r.Role, r.Mobile, r.ReportingManagerId, r.IsActive, r.Password,
+            new { r.UserId, r.FullName, r.Email, r.Role, r.Mobile, r.ReportingManagerId, r.IsActive,
+                  Password = setPwd ? PasswordHasher.Hash(r.Password!) : null,
                   r.EmailProvider, r.SmtpUsername, r.SmtpPassword, r.SmtpServer, r.SmtpPort, r.SmtpAuthenticate, r.SmtpUseSSL, r.EmailSignature, ModifiedBy = actingUserId });
         await SyncTmsUserAsync(c, r.UserId);   // keep the TMS dbo.Users in sync
     }
@@ -174,8 +176,9 @@ public sealed class UserAdminRepository
         var stored = await c.QuerySingleOrDefaultAsync<string?>(
             "SELECT PasswordHash FROM app.Users WHERE UserId=@id", new { id });
         if (stored is null) return "User not found";
-        if (!string.Equals(stored, currentPassword)) return "Current password is incorrect";
-        await c.ExecuteAsync("UPDATE app.Users SET PasswordHash=@newPassword WHERE UserId=@id", new { id, newPassword });
+        if (!PasswordHasher.Verify(currentPassword, stored)) return "Current password is incorrect";
+        await c.ExecuteAsync("UPDATE app.Users SET PasswordHash=@newPassword WHERE UserId=@id",
+            new { id, newPassword = PasswordHasher.Hash(newPassword) });
         return "Success";
     }
 

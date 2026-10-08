@@ -1,6 +1,7 @@
 using Dapper;
 using Indus360.Api.Data;
 using Indus360.Api.Models;
+using Indus360.Api.Services;
 
 namespace Indus360.Api.Repositories;
 
@@ -166,11 +167,13 @@ public sealed class SubscriptionRepository
     public async Task<bool> ValidateActorAsync(string userName, string password)
     {
         await using var c = await _db.OpenAsync(); // local app DB (app.Users — same store login uses)
-        return await c.ExecuteScalarAsync<int>(
-            @"SELECT COUNT(*) FROM app.Users
-              WHERE Email = @u AND PasswordHash = @p
-                AND IsActive = 1 AND ISNULL(IsDeletedTransaction,0) = 0",
-            new { u = userName, p = password }) > 0;
+        // Fetch the stored password then verify in C# (BCrypt hashes can't be matched in a SQL WHERE).
+        var stored = await c.QuerySingleOrDefaultAsync<string?>(
+            @"SELECT TOP 1 PasswordHash FROM app.Users
+              WHERE Email = @u AND IsActive = 1 AND ISNULL(IsDeletedTransaction,0) = 0
+              ORDER BY UserId",
+            new { u = userName });
+        return PasswordHasher.Verify(password, stored);
     }
 
     /// <summary>Soft delete (IsActive=0). Returns rows affected.</summary>
