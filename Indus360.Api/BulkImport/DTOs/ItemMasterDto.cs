@@ -102,9 +102,12 @@ public class ImportItemsRequest
 {
     [Required]
     public List<ItemMasterDto> Items { get; set; } = new();
-    
+
     [Required]
     public int ItemGroupId { get; set; }
+
+    /// <summary>Selected Indus product (e.g. "multiunit") — MultiUnit also seeds per-ProductionUnit ItemMasterStock.</summary>
+    public string? Application { get; set; }
 }
 
 public class ClearItemDataRequestDto

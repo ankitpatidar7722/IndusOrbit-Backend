@@ -150,21 +150,34 @@ public class CompanySubscriptionService : ICompanySubscriptionService
             if (exists > 0)
                 return new CompanySubscriptionResponse { Success = false, Message = $"CompanyUserID '{request.CompanyUserID}' already exists." };
 
+            // EstimoReact's web app authenticates by Company Code — so its web-modules API credentials
+            // (ApiCompanyUserName / ApiCompanyPassword) AND the CompanyUniqueCode are all stored as the
+            // Company Code. Applied only when a Company Code is actually provided (so a blank never wipes
+            // the auto IA-code). Every other application keeps its existing behaviour untouched.
+            var isReactApp = string.Equals((request.ApplicationName ?? "").Trim(), "EstimoReact", StringComparison.OrdinalIgnoreCase)
+                             && !string.IsNullOrWhiteSpace(request.CompanyCode);
+            if (isReactApp) request.CompanyUniqueCode = request.CompanyCode;
+            var apiCompanyUserName = isReactApp ? request.CompanyCode : null;
+            var apiCompanyPassword = isReactApp ? request.CompanyCode : null;
+
             var query = @"
                 INSERT INTO Indus_Company_Authentication_For_Web_Modules
                     (CompanyUserID, Password, Conn_String, CompanyName, ApplicationName, ApplicationVersion,
                      SubscriptionStatus, StatusDescription, SubscriptionStatusMessage,
-                     Address, Country, State, City, CompanyCode, CompanyUniqueCode, MaxCompanyUniqueCode,
+                     Address, Country, State, City, ApiCompanyUserName, ApiCompanyPassword, CompanyCode, CompanyUniqueCode, MaxCompanyUniqueCode,
                      GSTIN, Email, Mobile, LoginAllowed, FromDate, ToDate, PaymentDueDate, FYear,
                      IsMessageActive, MessageDurationValue, MessageDurationType)
                 VALUES
                     (@CompanyUserID, @Password, @Conn_String, @CompanyName, @ApplicationName, @ApplicationVersion,
                      @SubscriptionStatus, @StatusDescription, @SubscriptionStatusMessage,
-                     @Address, @Country, @State, @City, @CompanyCode, @CompanyUniqueCode, @MaxCompanyUniqueCode,
+                     @Address, @Country, @State, @City, @ApiCompanyUserName, @ApiCompanyPassword, @CompanyCode, @CompanyUniqueCode, @MaxCompanyUniqueCode,
                      @GSTIN, @Email, @Mobile, @LoginAllowed, @FromDate, @ToDate, @PaymentDueDate, @FYear,
                      @IsMessageActive, @MessageDurationValue, @MessageDurationType)";
 
-            await conn.ExecuteAsync(query, request);
+            var insertParams = new DynamicParameters(request);
+            insertParams.Add("ApiCompanyUserName", apiCompanyUserName);
+            insertParams.Add("ApiCompanyPassword", apiCompanyPassword);
+            await conn.ExecuteAsync(query, insertParams);
 
             Console.WriteLine($"[CompanySubscription] Created CompanyUserID={request.CompanyUserID}, Company={request.CompanyName}");
 
@@ -203,6 +216,14 @@ public class CompanySubscriptionService : ICompanySubscriptionService
             var oldDataQuery = "SELECT * FROM Indus_Company_Authentication_For_Web_Modules WHERE CompanyUserID = @CompanyUserID";
             var oldData = await conn.QueryFirstOrDefaultAsync<CompanySubscriptionDto>(oldDataQuery, new { CompanyUserID = keyToUpdate });
 
+            // EstimoReact: store the Company Code as the web-modules API credentials + CompanyUniqueCode
+            // (see CreateAsync). ISNULL keeps other apps' existing Api* values untouched on update.
+            var isReactApp = string.Equals((request.ApplicationName ?? "").Trim(), "EstimoReact", StringComparison.OrdinalIgnoreCase)
+                             && !string.IsNullOrWhiteSpace(request.CompanyCode);
+            if (isReactApp) request.CompanyUniqueCode = request.CompanyCode;
+            var apiCompanyUserName = isReactApp ? request.CompanyCode : null;
+            var apiCompanyPassword = isReactApp ? request.CompanyCode : null;
+
             var query = @"
                 UPDATE Indus_Company_Authentication_For_Web_Modules SET
                     CompanyUserID = @CompanyUserID,
@@ -220,6 +241,8 @@ public class CompanySubscriptionService : ICompanySubscriptionService
                     City = @City,
                     CompanyCode = @CompanyCode,
                     CompanyUniqueCode = @CompanyUniqueCode,
+                    ApiCompanyUserName = ISNULL(@ApiCompanyUserName, ApiCompanyUserName),
+                    ApiCompanyPassword = ISNULL(@ApiCompanyPassword, ApiCompanyPassword),
                     GSTIN = @GSTIN,
                     Email = @Email,
                     Mobile = @Mobile,
@@ -256,6 +279,8 @@ public class CompanySubscriptionService : ICompanySubscriptionService
                 request.City,
                 request.CompanyCode,
                 request.CompanyUniqueCode,
+                ApiCompanyUserName = apiCompanyUserName,
+                ApiCompanyPassword = apiCompanyPassword,
                 request.GSTIN,
                 request.Email,
                 request.Mobile,

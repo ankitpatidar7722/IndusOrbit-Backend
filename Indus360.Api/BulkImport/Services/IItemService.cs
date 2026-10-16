@@ -7,7 +7,7 @@ public interface IItemService
     Task<List<ItemMasterDto>> GetAllItemsAsync(int itemGroupId);
     Task<bool> SoftDeleteItemAsync(int itemId);
     Task<ItemValidationResultDto> ValidateItemsAsync(List<ItemMasterDto> items, int itemGroupId);
-    Task<ImportResultDto> ImportItemsAsync(List<ItemMasterDto> items, int itemGroupId);
+    Task<ImportResultDto> ImportItemsAsync(List<ItemMasterDto> items, int itemGroupId, string? application = null);
     Task<List<ItemGroupDto>> GetItemGroupsAsync();
     Task<List<HSNGroupDto>> GetHSNGroupsAsync();
     Task<FieldUnitsDto> GetFieldUnitsAsync(int itemGroupId);

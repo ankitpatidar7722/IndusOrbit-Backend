@@ -150,7 +150,10 @@ public class ContentAuthorityService : IContentAuthorityService
                         {
                             var srcDict = (IDictionary<string, object>)sourceRow;
                             srcDict["IsActive"] = 1;
-                            var cols = srcDict.Keys.Where(k => !k.Equals("ContentId", StringComparison.OrdinalIgnoreCase)).ToList();
+                            // ContentDynamicDrowCheckBox exists in the source template but not in every client DB
+                            // (e.g. PrintudeERP) → copying it fails with "Invalid column name". Never sync it.
+                            var cols = srcDict.Keys.Where(k => !k.Equals("ContentId", StringComparison.OrdinalIgnoreCase)
+                                && !k.Equals("ContentDynamicDrowCheckBox", StringComparison.OrdinalIgnoreCase)).ToList();
                             var sql = $"INSERT INTO ContentMaster ({string.Join(",", cols.Select(c => $"[{c}]"))}) VALUES ({string.Join(",", cols.Select(c => "@" + c))})";
                             var p = new DynamicParameters();
                             foreach (var c in cols) p.Add("@" + c, srcDict[c]);
@@ -225,7 +228,10 @@ public class ContentAuthorityService : IContentAuthorityService
                 if (srcRow != null)
                 {
                     var srcD = (IDictionary<string, object>)srcRow;
-                    var cols = srcD.Keys.Where(k => !k.Equals("ContentId", StringComparison.OrdinalIgnoreCase) && !k.Equals("ContentName", StringComparison.OrdinalIgnoreCase)).ToList();
+                    // ContentDynamicDrowCheckBox exists in the source template but not in every client DB
+                    // (e.g. PrintudeERP) → updating it fails with "Invalid column name". Never sync it.
+                    var cols = srcD.Keys.Where(k => !k.Equals("ContentId", StringComparison.OrdinalIgnoreCase) && !k.Equals("ContentName", StringComparison.OrdinalIgnoreCase)
+                        && !k.Equals("ContentDynamicDrowCheckBox", StringComparison.OrdinalIgnoreCase)).ToList();
                     if (cols.Count > 0)
                     {
                         var sql = $"UPDATE ContentMaster SET {string.Join(",", cols.Select(c => $"[{c}] = @{c}"))} WHERE ContentId = @Id";

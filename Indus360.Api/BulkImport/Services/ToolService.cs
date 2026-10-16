@@ -599,7 +599,7 @@ public class ToolService : IToolService
         return result;
     }
 
-    public async Task<ImportResultDto> ImportToolsAsync(List<ToolMasterDto> tools, int toolGroupId)
+    public async Task<ImportResultDto> ImportToolsAsync(List<ToolMasterDto> tools, int toolGroupId, string? application = null)
     {
         var result = new ImportResultDto();
         result.TotalRows = tools.Count;
@@ -879,6 +879,44 @@ public class ToolService : IToolService
 
         if (detailTable.Rows.Count > 0)
             await detailBulkCopy.WriteToServerAsync(detailTable);
+
+        // ─── 6b. MultiUnit only → seed ToolMasterStock: one row per (ToolID × active ProductionUnit) ──
+        // MultiUnit clients track stock per production unit, so every newly-imported tool needs a zero
+        // stock row against each unit in ProductionUnitMaster. NOT EXISTS keeps re-imports idempotent.
+        // Skipped entirely for single-unit apps.
+        var isMultiUnit = (application ?? "").Replace(" ", "").Equals("multiunit", StringComparison.OrdinalIgnoreCase);
+        if (isMultiUnit)
+        {
+          // Best-effort (see ItemService): tools are already imported, so a stock-seeding hiccup
+          // must not fail the whole import. Surface it as a warning instead.
+          try
+          {
+            var newToolIds = insertedTools.Values.Distinct().ToList();
+            var stockNow = DateTime.Now;
+            const int stockBatch = 1000;
+            for (int s = 0; s < newToolIds.Count; s += stockBatch)
+            {
+                var idBatch = newToolIds.Skip(s).Take(stockBatch).ToList();
+                await _connection.ExecuteAsync(@"
+                    INSERT INTO ToolMasterStock
+                        (ToolID, ToolGroupID, ProductionUnitID, CompanyID,
+                         PhysicalStock, BookedStock, AllocatedStock, IncomingStock, FloorStock, UnapprovedStock, IndentStock, RequisitionStock,
+                         CreatedBy, CreatedDate, IsDeletedTransaction)
+                    SELECT t.ToolID, @ToolGroupID, pu.ProductionUnitID, t.CompanyID,
+                           0, 0, 0, 0, 0, 0, 0, 0,
+                           2, @Now, 0
+                    FROM ToolMaster t
+                    CROSS JOIN (SELECT ProductionUnitID FROM ProductionUnitMaster WHERE ISNULL(IsDeletedTransaction, 0) = 0) pu
+                    WHERE t.ToolID IN @ToolIds
+                      AND NOT EXISTS (SELECT 1 FROM ToolMasterStock ex WHERE ex.ToolID = t.ToolID AND ex.ProductionUnitID = pu.ProductionUnitID)",
+                    new { ToolIds = idBatch, ToolGroupID = toolGroupId, Now = stockNow });
+            }
+          }
+          catch (Exception stockEx)
+          {
+            result.ErrorMessages.Add($"Tools imported, but seeding per-ProductionUnit ToolMasterStock failed: {stockEx.Message}");
+          }
+        }
 
         // ─── 7. Build result ────────────────────────────────────────────────────
         result.ImportedRows = successCount;

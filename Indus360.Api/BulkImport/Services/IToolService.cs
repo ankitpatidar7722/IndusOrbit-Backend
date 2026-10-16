@@ -7,7 +7,7 @@ public interface IToolService
     Task<List<ToolMasterDto>> GetAllToolsAsync(int toolGroupId);
     Task<bool> SoftDeleteToolAsync(int toolId);
     Task<ToolValidationResultDto> ValidateToolsAsync(List<ToolMasterDto> tools, int toolGroupId);
-    Task<ImportResultDto> ImportToolsAsync(List<ToolMasterDto> tools, int toolGroupId);
+    Task<ImportResultDto> ImportToolsAsync(List<ToolMasterDto> tools, int toolGroupId, string? application = null);
     Task<List<ToolGroupDto>> GetToolGroupsAsync();
     Task<List<HSNGroupDto>> GetToolHSNGroupsAsync();
     Task<List<UnitDto>> GetToolUnitsAsync();

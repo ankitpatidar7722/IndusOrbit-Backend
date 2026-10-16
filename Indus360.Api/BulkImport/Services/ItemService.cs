@@ -958,7 +958,7 @@ public class ItemService : IItemService
         return result;
     }
 
-    public async Task<ImportResultDto> ImportItemsAsync(List<ItemMasterDto> items, int itemGroupId)
+    public async Task<ImportResultDto> ImportItemsAsync(List<ItemMasterDto> items, int itemGroupId, string? application = null)
     {
         var result = new ImportResultDto();
         result.TotalRows = items.Count;
@@ -1286,6 +1286,44 @@ public class ItemService : IItemService
 
         if (detailTable.Rows.Count > 0)
             await detailBulkCopy.WriteToServerAsync(detailTable);
+
+        // ─── 5b. MultiUnit only → seed ItemMasterStock: one row per (ItemID × active ProductionUnit) ──
+        // MultiUnit clients track stock per production unit, so every newly-imported item needs a zero
+        // stock row against each unit in ProductionUnitMaster. NOT EXISTS makes re-imports idempotent
+        // (no duplicate stock rows). Skipped entirely for single-unit apps (Estimoprime, etc.).
+        var isMultiUnit = (application ?? "").Replace(" ", "").Equals("multiunit", StringComparison.OrdinalIgnoreCase);
+        if (isMultiUnit)
+        {
+          // Best-effort: the items are already imported, so a stock-seeding hiccup must not fail the
+          // whole import (a re-import would create duplicate items). Surface it as a warning instead.
+          try
+          {
+            var newItemIds = insertedItems.Values.Distinct().ToList();
+            var stockNow = DateTime.Now;
+            const int stockBatch = 1000;
+            for (int s = 0; s < newItemIds.Count; s += stockBatch)
+            {
+                var idBatch = newItemIds.Skip(s).Take(stockBatch).ToList();
+                await _connection.ExecuteAsync(@"
+                    INSERT INTO ItemMasterStock
+                        (ItemID, ProductionUnitID,
+                         PhysicalStock, BookedStock, AllocatedStock, IncomingStock, FloorStock, UnapprovedStock, IndentStock, RequisitionStock,
+                         CompanyID, ItemGroupID, CreatedBy, CreatedDate, IsDeletedTransaction)
+                    SELECT i.ItemID, pu.ProductionUnitID,
+                           0, 0, 0, 0, 0, 0, 0, 0,
+                           i.CompanyID, @ItemGroupID, 2, @Now, 0
+                    FROM ItemMaster i
+                    CROSS JOIN (SELECT ProductionUnitID FROM ProductionUnitMaster WHERE ISNULL(IsDeletedTransaction, 0) = 0) pu
+                    WHERE i.ItemID IN @ItemIds
+                      AND NOT EXISTS (SELECT 1 FROM ItemMasterStock ex WHERE ex.ItemID = i.ItemID AND ex.ProductionUnitID = pu.ProductionUnitID)",
+                    new { ItemIds = idBatch, ItemGroupID = itemGroupId, Now = stockNow });
+            }
+          }
+          catch (Exception stockEx)
+          {
+            result.ErrorMessages.Add($"Items imported, but seeding per-ProductionUnit ItemMasterStock failed: {stockEx.Message}");
+          }
+        }
 
         // ─── 6. Build result ──────────────────────────────────────────────────
         result.ImportedRows = successCount;

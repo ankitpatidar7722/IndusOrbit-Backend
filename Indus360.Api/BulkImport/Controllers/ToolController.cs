@@ -132,7 +132,7 @@ public class ToolController : ControllerBase
                 return BadRequest(new { message = "Validation failed. Please fix errors before importing.", validationResult });
 
             // Then import
-            var importResult = await _toolService.ImportToolsAsync(request.Tools, request.ToolGroupId);
+            var importResult = await _toolService.ImportToolsAsync(request.Tools, request.ToolGroupId, request.Application);
 
             if (importResult.Success)
                 return Ok(importResult);

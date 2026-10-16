@@ -79,6 +79,9 @@ public class ImportToolsRequest
     public List<ToolMasterDto> Tools { get; set; } = new();
 
     public int ToolGroupId { get; set; }
+
+    /// <summary>Selected Indus product (e.g. "multiunit") — MultiUnit also seeds per-ProductionUnit ToolMasterStock.</summary>
+    public string? Application { get; set; }
 }
 
 public class ClearToolDataRequestDto

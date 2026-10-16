@@ -234,7 +234,7 @@ public class ItemController : ControllerBase
         try
         {
             // Call bulk import directly — service handles per-row skipping and error reporting
-            var importResult = await _itemService.ImportItemsAsync(request.Items, request.ItemGroupId);
+            var importResult = await _itemService.ImportItemsAsync(request.Items, request.ItemGroupId, request.Application);
 
             if (importResult.Success)
             {
