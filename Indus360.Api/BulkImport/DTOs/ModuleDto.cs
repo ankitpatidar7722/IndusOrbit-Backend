@@ -60,3 +60,27 @@ public class ItemGroupComparisonDto
     public bool IsDeletedInClient { get; set; }
     public bool Status { get; set; } // The final CheckBox value: ExistsInBoth AND !IsDeleted
 }
+
+// ── Dynamic Field Master (sync a group's FIELDS from the Source DB into a client DB) ──
+/// <summary>One "Sub Module" = a group of the chosen master (Item/Ledger/Tool), e.g. the Ledger
+/// group "Client". Populates the Sub Module dropdown.</summary>
+public class FieldSubModuleDto
+{
+    public int GroupId { get; set; }
+    public string GroupName { get; set; } = string.Empty;
+}
+
+/// <summary>One field row in the Dynamic Field Master grid — a field of the selected group in the
+/// Source DB, flagged by whether it also exists (not soft-deleted) in the client DB.</summary>
+public class FieldComparisonDto
+{
+    public int FieldId { get; set; }
+    public string FieldName { get; set; } = string.Empty;
+    public string FieldDisplayName { get; set; } = string.Empty;
+    public string FieldDataType { get; set; } = string.Empty;
+    public string FieldType { get; set; } = string.Empty;
+    public bool ExistsInSource { get; set; }
+    public bool ExistsInClient { get; set; }
+    public bool IsDeletedInClient { get; set; }
+    public bool Status { get; set; } // ticked = present+active in the client (ExistsInBoth AND !IsDeleted)
+}

@@ -775,6 +775,136 @@ public class ModuleService : IModuleService
         }
     }
 
+    // ── Dynamic Field Master ──────────────────────────────────────────────────────────────────
+    // Metadata for a master "type": its field table + field PK, the field's group FK, and the group
+    // master table + its id/name columns (the "Sub Module" dropdown).
+    private static (string fieldTable, string fieldIdCol, string groupFkCol, string groupTable, string groupIdCol, string groupNameCol) FieldMeta(string type) => type switch
+    {
+        "Ledger" => ("LedgerGroupFieldMaster", "LedgerGroupFieldID", "LedgerGroupID", "LedgerGroupMaster", "LedgerGroupID", "LedgerGroupNameDisplay"),
+        "Tool"   => ("ToolGroupFieldMaster",   "ToolGroupFieldID",   "ToolGroupID",   "ToolGroupMaster",   "ToolGroupID",   "ToolGroupName"),
+        _        => ("ItemGroupFieldMaster",   "ItemGroupFieldID",   "ItemGroupID",   "ItemGroupMaster",   "ItemGroupID",   "ItemGroupName"),
+    };
+
+    /// <summary>Sub Module dropdown: the groups of the chosen master, from the Source catalog.</summary>
+    public async Task<List<FieldSubModuleDto>> GetFieldSubModulesAsync(string type)
+    {
+        var (_, _, _, groupTable, gIdCol, gNameCol) = FieldMeta(type);
+        try
+        {
+            using var src = new SqlConnection(IndusConnStr);
+            var rows = await src.QueryAsync<dynamic>(
+                $"SELECT {gIdCol} AS ID, {gNameCol} AS NAME FROM {groupTable} WHERE ISNULL(IsDeletedTransaction,0)=0 ORDER BY {gNameCol}");
+            return rows.Select(r => new FieldSubModuleDto { GroupId = Convert.ToInt32(r.ID), GroupName = r.NAME?.ToString() ?? "" })
+                       .Where(x => !string.IsNullOrWhiteSpace(x.GroupName)).ToList();
+        }
+        catch (Exception ex) { Console.WriteLine($"[ModuleService] GetFieldSubModulesAsync {type} error: {ex.Message}"); return new(); }
+    }
+
+    /// <summary>Grid rows: the selected group's fields from the Source, each flagged by whether it also
+    /// exists (not soft-deleted) in the client DB (the injected per-request connection, resolved from
+    /// X-Target-Company). Matched by (GroupID + FieldName) — NOT by field id: a client DB holds the same
+    /// field under its OWN identity value (source "Quality"=20 but client "Quality"=60), so an id match
+    /// would wrongly report every field as "not in client".</summary>
+    public async Task<List<FieldComparisonDto>> GetFieldComparisonForClientAsync(string type, int groupId)
+    {
+        var (fTable, fIdCol, groupFkCol, _, _, _) = FieldMeta(type);
+        var result = new List<FieldComparisonDto>();
+        try
+        {
+            using var src = new SqlConnection(IndusConnStr);
+            var sourceRows = await src.QueryAsync<dynamic>(
+                $@"SELECT {fIdCol} AS ID, FieldName, FieldDisplayName, FieldDataType, FieldType
+                   FROM {fTable} WHERE {groupFkCol} = @g AND ISNULL(IsDeletedTransaction,0)=0
+                   ORDER BY ISNULL(FieldDrawSequence,255), FieldName", new { g = groupId });
+
+            // Client fields of THIS group, keyed by FieldName (the group id is already the WHERE filter).
+            var clientMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var clientRows = await _connection.QueryAsync<dynamic>(
+                    $"SELECT FieldName, ISNULL(IsDeletedTransaction,0) AS DEL FROM {fTable} WHERE {groupFkCol} = @g", new { g = groupId });
+                foreach (var c in clientRows)
+                {
+                    string nm = ((string?)c.FieldName)?.Trim() ?? "";
+                    if (nm.Length > 0) clientMap[nm] = Convert.ToInt32(c.DEL);
+                }
+            }
+            catch { }
+
+            foreach (var row in sourceRows)
+            {
+                int id = Convert.ToInt32(row.ID);
+                string name = (((string?)row.FieldName) ?? "").Trim();
+                bool inClient = clientMap.TryGetValue(name, out var clientDel);
+                bool del = inClient && clientDel == 1;
+                result.Add(new FieldComparisonDto
+                {
+                    FieldId = id,
+                    FieldName = row.FieldName?.ToString() ?? "",
+                    FieldDisplayName = row.FieldDisplayName?.ToString() ?? "",
+                    FieldDataType = row.FieldDataType?.ToString() ?? "",
+                    FieldType = row.FieldType?.ToString() ?? "",
+                    ExistsInSource = true, ExistsInClient = inClient, IsDeletedInClient = del, Status = inClient && !del,
+                });
+            }
+            return result;
+        }
+        catch (Exception ex) { Console.WriteLine($"[ModuleService] GetFieldComparisonForClientAsync {type} error: {ex.Message}"); return result; }
+    }
+
+    /// <summary>Apply the chosen field states into the client DB — matched by (GroupID + FieldName):
+    /// ticked+present → reactivate (IsDeletedTransaction=0); ticked+missing → copy the row from Source,
+    /// letting the client auto-assign a NEW id (no IDENTITY_INSERT — the source id could collide with a
+    /// different field the client already holds); unticked+present → soft-delete (IsDeletedTransaction=1).</summary>
+    public async Task<bool> SyncFieldsForClientAsync(string type, int groupId, List<FieldComparisonDto> syncData)
+    {
+        var (fTable, fIdCol, groupFkCol, _, _, _) = FieldMeta(type);
+        try
+        {
+            // Columns the client table actually has (schema-drift safety for the copy).
+            var clientCols = (await _connection.QueryAsync<string>(
+                "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(@t)", new { t = fTable }))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var f in syncData)
+            {
+                var name = (f.FieldName ?? "").Trim();
+                if (name.Length == 0) continue;
+                // Match the client row by GroupID + FieldName (ids differ between source and client).
+                var exists = await _connection.ExecuteScalarAsync<int>(
+                    $"SELECT COUNT(1) FROM {fTable} WHERE {groupFkCol} = @g AND LTRIM(RTRIM(FieldName)) = @n", new { g = groupId, n = name });
+                if (f.Status)
+                {
+                    if (exists > 0)
+                        await _connection.ExecuteAsync(
+                            $"UPDATE {fTable} SET IsDeletedTransaction = 0 WHERE {groupFkCol} = @g AND LTRIM(RTRIM(FieldName)) = @n", new { g = groupId, n = name });
+                    else
+                    {
+                        using var src = new SqlConnection(IndusConnStr);
+                        var full = await src.QueryFirstOrDefaultAsync<dynamic>($"SELECT * FROM {fTable} WHERE {fIdCol} = @ID", new { ID = f.FieldId });
+                        if (full != null)
+                        {
+                            var dict = (IDictionary<string, object>)full;
+                            if (dict.ContainsKey("IsDeletedTransaction")) dict["IsDeletedTransaction"] = 0;
+                            // Drop the identity PK so the client assigns its own id (avoids collisions).
+                            var keys = dict.Keys.Where(k => clientCols.Contains(k) && !k.Equals(fIdCol, StringComparison.OrdinalIgnoreCase)).ToList();
+                            var dp = new DynamicParameters();
+                            foreach (var k in keys) dp.Add(k, dict[k]);
+                            string columns = string.Join(",", keys);
+                            string values = string.Join(",", keys.Select(k => "@" + k));
+                            await _connection.ExecuteAsync($"INSERT INTO {fTable} ({columns}) VALUES ({values});", dp);
+                        }
+                    }
+                }
+                else if (exists > 0)
+                    await _connection.ExecuteAsync(
+                        $"UPDATE {fTable} SET IsDeletedTransaction = 1 WHERE {groupFkCol} = @g AND LTRIM(RTRIM(FieldName)) = @n", new { g = groupId, n = name });
+            }
+            return true;
+        }
+        catch (Exception ex) { Console.WriteLine($"[ModuleService] SyncFieldsForClientAsync {type} error: {ex.Message}"); return false; }
+    }
+
     private string EnsureTrust(string connectionString)
     {
         if (string.IsNullOrWhiteSpace(connectionString)) return connectionString;

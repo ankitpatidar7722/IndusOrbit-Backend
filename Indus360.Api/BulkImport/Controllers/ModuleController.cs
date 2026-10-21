@@ -376,6 +376,45 @@ public class ModuleController : ControllerBase
         public List<ItemGroupComparisonDto> SyncData { get; set; } = new();
     }
 
+    // ── Dynamic Field Master ── target client DB = the X-Target-Company-resolved per-request connection
+    // (so no connectionString in the body — the Bulk Import shell already picked the client). ──
+
+    /// <summary>Sub Module dropdown values (the chosen master's groups).</summary>
+    [HttpGet("FieldSubModules")]
+    public async Task<IActionResult> GetFieldSubModules([FromQuery] string type)
+    {
+        try { return Ok(await _moduleService.GetFieldSubModulesAsync(type)); }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Grid: a group's fields from the Source, flagged by whether they also exist in the client.</summary>
+    [HttpGet("FieldComparisonForClient")]
+    public async Task<IActionResult> GetFieldComparisonForClient([FromQuery] string type, [FromQuery] int groupId)
+    {
+        try { return Ok(await _moduleService.GetFieldComparisonForClientAsync(type, groupId)); }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Copy the ticked fields from Source into the client DB (soft-delete the unticked ones).</summary>
+    [HttpPost("SyncFieldsForClient")]
+    public async Task<IActionResult> SyncFieldsForClient([FromBody] SyncFieldsRequest request)
+    {
+        try
+        {
+            var ok = await _moduleService.SyncFieldsForClientAsync(request.Type, request.GroupId, request.SyncData);
+            if (ok) return Ok(new { Message = "Fields synchronized successfully" });
+            return BadRequest(new { Message = "Failed to synchronize fields" });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    public class SyncFieldsRequest
+    {
+        public string Type { get; set; } = string.Empty;
+        public int GroupId { get; set; }
+        public List<FieldComparisonDto> SyncData { get; set; } = new();
+    }
+
     [HttpPut("UpdateForClient")]
     public async Task<IActionResult> UpdateModuleForClient([FromBody] CreateModuleForClientRequest request)
     {

@@ -33,4 +33,10 @@ public interface IModuleService
     // Client-DB variants
     Task<List<ItemGroupComparisonDto>> GetItemGroupComparisonForClientAsync(string type, string connectionString);
     Task<bool> SyncItemGroupsForClientAsync(string type, List<ItemGroupComparisonDto> syncData, string connectionString);
+
+    // Dynamic Field Master — sync a group's FIELDS from the Source DB into the picked client's DB
+    // (target = the injected per-request SqlConnection, resolved from X-Target-Company).
+    Task<List<FieldSubModuleDto>> GetFieldSubModulesAsync(string type);
+    Task<List<FieldComparisonDto>> GetFieldComparisonForClientAsync(string type, int groupId);
+    Task<bool> SyncFieldsForClientAsync(string type, int groupId, List<FieldComparisonDto> syncData);
 }

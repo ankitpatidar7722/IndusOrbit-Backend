@@ -96,6 +96,16 @@ IF NOT EXISTS (SELECT 1 FROM app.ModuleMaster WHERE ModuleName = '/bulk-import/c
         ('/bulk-import/company-master', 'Company Master', 'Bulk Import', 'Bulk Import',
          9, @grpSgi, 'Building2', NULL, NULL, 1, 0, 1);
 
+-- Dynamic Field Master (sync a group's FIELDS from the Source DB into a client DB)
+IF NOT EXISTS (SELECT 1 FROM app.ModuleMaster WHERE ModuleName = '/bulk-import/dynamic-field-master')
+    INSERT INTO app.ModuleMaster
+        (ModuleName, ModuleDisplayName, ModuleHeadName, ModuleHeadDisplayName,
+         ModuleDisplayOrder, SetGroupIndex, ModuleIcon, ParentModuleName, ReactRoutePath,
+         CompanyID, IsDeletedTransaction, IsSidebarItem)
+    VALUES
+        ('/bulk-import/dynamic-field-master', 'Dynamic Field Master', 'Bulk Import', 'Bulk Import',
+         10, @grpSgi, 'ListChecks', NULL, NULL, 1, 0, 1);
+
 -- Grant every Admin-group viewer the same rights on each new Bulk Import module (mirror /audit-logs).
 DECLARE @auditId INT = (SELECT ModuleID FROM app.ModuleMaster WHERE ModuleName = '/audit-logs');
 INSERT INTO app.UserModuleAuthentication
