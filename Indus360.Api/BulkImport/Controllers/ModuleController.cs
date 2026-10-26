@@ -415,6 +415,27 @@ public class ModuleController : ControllerBase
         public List<FieldComparisonDto> SyncData { get; set; } = new();
     }
 
+    /// <summary>The client's OWN fields for a group (destination DB) — for the Change Sequence screen.</summary>
+    [HttpGet("ClientFieldsForClient")]
+    public async Task<IActionResult> GetClientFields([FromQuery] string type, [FromQuery] int groupId)
+    {
+        try { return Ok(await _moduleService.GetClientFieldsAsync(type, groupId)); }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
+    /// <summary>Reorder only — persist the fields' draw sequence (grid order) into the client DB.</summary>
+    [HttpPost("SaveFieldSequenceForClient")]
+    public async Task<IActionResult> SaveFieldSequenceForClient([FromBody] SyncFieldsRequest request)
+    {
+        try
+        {
+            var ok = await _moduleService.SaveFieldSequenceAsync(request.Type, request.GroupId, request.SyncData);
+            if (ok) return Ok(new { Message = "Field sequence saved successfully" });
+            return BadRequest(new { Message = "Failed to save field sequence" });
+        }
+        catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
+    }
+
     [HttpPut("UpdateForClient")]
     public async Task<IActionResult> UpdateModuleForClient([FromBody] CreateModuleForClientRequest request)
     {

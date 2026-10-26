@@ -817,27 +817,33 @@ public class ModuleService : IModuleService
                    FROM {fTable} WHERE {groupFkCol} = @g AND ISNULL(IsDeletedTransaction,0)=0
                    ORDER BY ISNULL(FieldDrawSequence,255), FieldName", new { g = groupId });
 
-            // Client fields of THIS group, keyed by FieldName (the group id is already the WHERE filter).
-            var clientMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            // Client fields of THIS group, keyed by FieldName → (soft-deleted?, its draw sequence).
+            var clientMap = new Dictionary<string, (int del, int seq)>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 var clientRows = await _connection.QueryAsync<dynamic>(
-                    $"SELECT FieldName, ISNULL(IsDeletedTransaction,0) AS DEL FROM {fTable} WHERE {groupFkCol} = @g", new { g = groupId });
+                    $"SELECT FieldName, ISNULL(IsDeletedTransaction,0) AS DEL, ISNULL(FieldDrawSequence,255) AS SEQ FROM {fTable} WHERE {groupFkCol} = @g", new { g = groupId });
                 foreach (var c in clientRows)
                 {
                     string nm = ((string?)c.FieldName)?.Trim() ?? "";
-                    if (nm.Length > 0) clientMap[nm] = Convert.ToInt32(c.DEL);
+                    if (nm.Length > 0) clientMap[nm] = (Convert.ToInt32(c.DEL), Convert.ToInt32(c.SEQ));
                 }
             }
             catch { }
 
+            // Order by the CLIENT's draw sequence for present fields (so a saved drag-reorder persists on
+            // reload); fields not yet in the client fall after, in the Source order.
+            var ordered = new List<(FieldComparisonDto dto, int sortKey)>();
+            int srcPos = 0;
             foreach (var row in sourceRows)
             {
+                srcPos++;
                 int id = Convert.ToInt32(row.ID);
                 string name = (((string?)row.FieldName) ?? "").Trim();
-                bool inClient = clientMap.TryGetValue(name, out var clientDel);
-                bool del = inClient && clientDel == 1;
-                result.Add(new FieldComparisonDto
+                bool inClient = clientMap.TryGetValue(name, out var cv);
+                bool del = inClient && cv.del == 1;
+                int sortKey = (inClient && !del) ? cv.seq : 1000 + srcPos;
+                ordered.Add((new FieldComparisonDto
                 {
                     FieldId = id,
                     FieldName = row.FieldName?.ToString() ?? "",
@@ -845,17 +851,18 @@ public class ModuleService : IModuleService
                     FieldDataType = row.FieldDataType?.ToString() ?? "",
                     FieldType = row.FieldType?.ToString() ?? "",
                     ExistsInSource = true, ExistsInClient = inClient, IsDeletedInClient = del, Status = inClient && !del,
-                });
+                }, sortKey));
             }
-            return result;
+            return ordered.OrderBy(x => x.sortKey).ThenBy(x => x.dto.FieldName, StringComparer.OrdinalIgnoreCase).Select(x => x.dto).ToList();
         }
         catch (Exception ex) { Console.WriteLine($"[ModuleService] GetFieldComparisonForClientAsync {type} error: {ex.Message}"); return result; }
     }
 
-    /// <summary>Apply the chosen field states into the client DB — matched by (GroupID + FieldName):
-    /// ticked+present → reactivate (IsDeletedTransaction=0); ticked+missing → copy the row from Source,
-    /// letting the client auto-assign a NEW id (no IDENTITY_INSERT — the source id could collide with a
-    /// different field the client already holds); unticked+present → soft-delete (IsDeletedTransaction=1).</summary>
+    /// <summary>ADD / REMOVE fields in the client DB — matched by (GroupID + FieldName): ticked+present →
+    /// reactivate (IsDeletedTransaction=0) WITHOUT touching its draw order; ticked+missing → copy the row
+    /// from Source (client auto-assigns a new id; the new field's FieldDrawSequence is appended AFTER the
+    /// group's current max, so the client's existing field ORDER is never disturbed by an add); unticked+
+    /// present → soft-delete. Reordering is a SEPARATE operation (see SaveFieldSequenceAsync).</summary>
     public async Task<bool> SyncFieldsForClientAsync(string type, int groupId, List<FieldComparisonDto> syncData)
     {
         var (fTable, fIdCol, groupFkCol, _, _, _) = FieldMeta(type);
@@ -865,6 +872,11 @@ public class ModuleService : IModuleService
             var clientCols = (await _connection.QueryAsync<string>(
                 "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(@t)", new { t = fTable }))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            // Newly-added fields append AFTER the group's current max draw sequence → existing order kept.
+            int appendSeq = await _connection.ExecuteScalarAsync<int?>(
+                $"SELECT MAX(CAST(FieldDrawSequence AS int)) FROM {fTable} WHERE {groupFkCol} = @g AND ISNULL(IsDeletedTransaction,0) = 0",
+                new { g = groupId }) ?? 0;
 
             foreach (var f in syncData)
             {
@@ -876,6 +888,7 @@ public class ModuleService : IModuleService
                 if (f.Status)
                 {
                     if (exists > 0)
+                        // reactivate only — do NOT change FieldDrawSequence (keep the client's own order)
                         await _connection.ExecuteAsync(
                             $"UPDATE {fTable} SET IsDeletedTransaction = 0 WHERE {groupFkCol} = @g AND LTRIM(RTRIM(FieldName)) = @n", new { g = groupId, n = name });
                     else
@@ -886,6 +899,7 @@ public class ModuleService : IModuleService
                         {
                             var dict = (IDictionary<string, object>)full;
                             if (dict.ContainsKey("IsDeletedTransaction")) dict["IsDeletedTransaction"] = 0;
+                            if (dict.ContainsKey("FieldDrawSequence")) dict["FieldDrawSequence"] = ++appendSeq;   // append at the end
                             // Drop the identity PK so the client assigns its own id (avoids collisions).
                             var keys = dict.Keys.Where(k => clientCols.Contains(k) && !k.Equals(fIdCol, StringComparison.OrdinalIgnoreCase)).ToList();
                             var dp = new DynamicParameters();
@@ -903,6 +917,54 @@ public class ModuleService : IModuleService
             return true;
         }
         catch (Exception ex) { Console.WriteLine($"[ModuleService] SyncFieldsForClientAsync {type} error: {ex.Message}"); return false; }
+    }
+
+    /// <summary>Reorder ONLY — set each field's <c>FieldDrawSequence</c> in the client DB to its position in
+    /// <paramref name="orderedFields"/> (1, 2, 3 … unique, no duplicate), matched by (GroupID + FieldName).
+    /// Adds / removes nothing; Source is never touched. Backs the "Change Sequence" screen.</summary>
+    public async Task<bool> SaveFieldSequenceAsync(string type, int groupId, List<FieldComparisonDto> orderedFields)
+    {
+        var (fTable, _, groupFkCol, _, _, _) = FieldMeta(type);
+        try
+        {
+            int seq = 0;
+            foreach (var f in orderedFields)
+            {
+                var name = (f.FieldName ?? "").Trim();
+                if (name.Length == 0) continue;
+                seq++;
+                await _connection.ExecuteAsync(
+                    $"UPDATE {fTable} SET FieldDrawSequence = @seq WHERE {groupFkCol} = @g AND LTRIM(RTRIM(FieldName)) = @n AND ISNULL(IsDeletedTransaction,0) = 0",
+                    new { g = groupId, n = name, seq });
+            }
+            return true;
+        }
+        catch (Exception ex) { Console.WriteLine($"[ModuleService] SaveFieldSequenceAsync {type} error: {ex.Message}"); return false; }
+    }
+
+    /// <summary>The CLIENT's OWN active fields for a group (read straight from the destination DB), ordered
+    /// by FieldDrawSequence — used by the "Change Sequence" screen so EVERY field that exists in the client
+    /// is reorderable, including fields the client has that the Source does NOT.</summary>
+    public async Task<List<FieldComparisonDto>> GetClientFieldsAsync(string type, int groupId)
+    {
+        var (fTable, fIdCol, groupFkCol, _, _, _) = FieldMeta(type);
+        try
+        {
+            var rows = await _connection.QueryAsync<dynamic>(
+                $@"SELECT {fIdCol} AS ID, FieldName, FieldDisplayName, FieldDataType, FieldType
+                   FROM {fTable} WHERE {groupFkCol} = @g AND ISNULL(IsDeletedTransaction,0) = 0
+                   ORDER BY ISNULL(FieldDrawSequence,255), FieldName", new { g = groupId });
+            return rows.Select(r => new FieldComparisonDto
+            {
+                FieldId = Convert.ToInt32(r.ID),
+                FieldName = r.FieldName?.ToString() ?? "",
+                FieldDisplayName = r.FieldDisplayName?.ToString() ?? "",
+                FieldDataType = r.FieldDataType?.ToString() ?? "",
+                FieldType = r.FieldType?.ToString() ?? "",
+                ExistsInSource = false, ExistsInClient = true, IsDeletedInClient = false, Status = true,
+            }).Where(x => !string.IsNullOrWhiteSpace(x.FieldName)).ToList();
+        }
+        catch (Exception ex) { Console.WriteLine($"[ModuleService] GetClientFieldsAsync {type} error: {ex.Message}"); return new(); }
     }
 
     private string EnsureTrust(string connectionString)

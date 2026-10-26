@@ -39,4 +39,6 @@ public interface IModuleService
     Task<List<FieldSubModuleDto>> GetFieldSubModulesAsync(string type);
     Task<List<FieldComparisonDto>> GetFieldComparisonForClientAsync(string type, int groupId);
     Task<bool> SyncFieldsForClientAsync(string type, int groupId, List<FieldComparisonDto> syncData);
+    Task<bool> SaveFieldSequenceAsync(string type, int groupId, List<FieldComparisonDto> orderedFields);
+    Task<List<FieldComparisonDto>> GetClientFieldsAsync(string type, int groupId);
 }
