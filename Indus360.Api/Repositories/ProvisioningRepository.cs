@@ -1,5 +1,7 @@
 using System.Data;
+using System.IO.Compression;
 using System.Text;
+using System.Threading.Channels;
 using Dapper;
 using Indus360.Api.Models;
 using Microsoft.Data.SqlClient;
@@ -147,6 +149,149 @@ public sealed class ProvisioningRepository
         await exec;   // observe completion / propagate any error
     }
 
+    private const int TransferChunkBytes = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// Copy a .bak from <paramref name="sourceServer"/>'s disk to the target's disk through SQL connections
+    /// (no SMB/UNC between the cloud SQL boxes). Streamed in 8 MB chunks: each chunk is read sequentially
+    /// off the source (OPENROWSET … SINGLE_BLOB), gzip-compressed here (backups shrink ~5x) and inserted
+    /// into a tempdb staging table on the target WHILE the next chunk downloads (bounded pipeline — the
+    /// two network legs overlap and memory stays at a few chunks instead of the whole file). The target
+    /// then rebuilds the file in one batch: DECOMPRESS each chunk (GZIP — every SQL edition, unlike
+    /// BACKUP … WITH COMPRESSION which Web/Express don't support) → ADODB.Stream → SaveToFile.
+    /// </summary>
+    private async Task TransferBackupAsync(string sourceServer, string sourcePath, SqlConnection tconn,
+        string targetPath, Action<string, int, string>? report)
+    {
+        var targetServer = tconn.DataSource;
+        var stage = $"tempdb.dbo.[_prov_{Guid.NewGuid():N}]";
+        await tconn.ExecuteAsync($"CREATE TABLE {stage} (Seq int NOT NULL PRIMARY KEY, Data varbinary(max) NOT NULL)", commandTimeout: 30);
+        try
+        {
+            await using var read = MasterConnection(sourceServer);
+            await read.OpenAsync();
+
+            // Best-effort size (for the progress bar) from the backup history of that exact file.
+            long total = 0;
+            try
+            {
+                total = await read.ExecuteScalarAsync<long?>(@"
+                    SELECT TOP 1 CAST(b.backup_size AS bigint) FROM msdb.dbo.backupset b
+                    JOIN msdb.dbo.backupmediafamily m ON m.media_set_id = b.media_set_id
+                    WHERE m.physical_device_name = @p ORDER BY b.backup_finish_date DESC",
+                    new { p = sourcePath }, commandTimeout: 30) ?? 0;
+            }
+            catch { /* progress just shows MB */ }
+
+            using var cts = new CancellationTokenSource();
+            var channel = Channel.CreateBounded<(int Seq, byte[] Gz)>(
+                new BoundedChannelOptions(3) { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
+
+            // Consumer: push compressed chunks to the target's staging table.
+            var upload = Task.Run(async () =>
+            {
+                try
+                {
+                    await using var up = MasterConnection(targetServer);
+                    await up.OpenAsync(cts.Token);
+                    await foreach (var (seq, gz) in channel.Reader.ReadAllAsync(cts.Token))
+                    {
+                        await using var ins = new SqlCommand($"INSERT {stage} (Seq, Data) VALUES (@s, @d)", up) { CommandTimeout = 300 };
+                        ins.Parameters.Add("@s", SqlDbType.Int).Value = seq;
+                        ins.Parameters.Add("@d", SqlDbType.VarBinary, -1).Value = gz;
+                        await ins.ExecuteNonQueryAsync(cts.Token);
+                    }
+                }
+                catch { cts.Cancel(); throw; }   // unblock the producer
+            });
+            _ = upload.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+
+            // Producer: stream the file off the source, compress, hand over.
+            long raw = 0, packed = 0;
+            var chunks = 0;
+            try
+            {
+                await using var rcmd = new SqlCommand(
+                    $"SELECT BulkColumn FROM OPENROWSET(BULK N'{sourcePath.Replace("'", "''")}', SINGLE_BLOB) AS f", read)
+                    { CommandTimeout = 1800 };
+                await using var reader = await rcmd.ExecuteReaderAsync(CommandBehavior.SequentialAccess, cts.Token);
+                if (!await reader.ReadAsync(cts.Token))
+                    throw new InvalidOperationException("Could not read the backup file back from the source server.");
+                await using var src = reader.GetStream(0);
+                var buf = new byte[TransferChunkBytes];
+                while (true)
+                {
+                    var n = 0;
+                    while (n < buf.Length)
+                    {
+                        var r = await src.ReadAsync(buf.AsMemory(n), cts.Token);
+                        if (r == 0) break;
+                        n += r;
+                    }
+                    if (n == 0) break;
+
+                    byte[] gz;
+                    using (var ms = new MemoryStream())
+                    {
+                        using (var z = new GZipStream(ms, CompressionLevel.Fastest, leaveOpen: true))
+                            z.Write(buf, 0, n);
+                        gz = ms.ToArray();
+                    }
+                    await channel.Writer.WriteAsync((chunks++, gz), cts.Token);
+                    raw += n; packed += gz.Length;
+
+                    var mb = raw / (1024 * 1024);
+                    var pct = total > 0 ? 38 + (int)(20.0 * Math.Min(1.0, (double)raw / total)) : 38;
+                    report?.Invoke("transfer", pct,
+                        $"Transferring backup… {mb}{(total > 0 ? $" / {total / (1024 * 1024)}" : "")} MB (sent compressed: {packed / (1024 * 1024)} MB)");
+                    if (n < buf.Length) break;   // last (partial) chunk
+                }
+            }
+            catch (Exception e)
+            {
+                channel.Writer.TryComplete(e);
+                if (e is OperationCanceledException) await upload;   // surfaces the upload's real error
+                throw;
+            }
+            channel.Writer.TryComplete();
+            await upload;
+            if (chunks == 0)
+                throw new InvalidOperationException("The template backup file was empty or unreadable on the source server.");
+
+            // Target: rebuild the file from the staged chunks in ONE batch (OLE handles are batch-scoped).
+            report?.Invoke("transfer", 59, "Writing backup on the target server…");
+            await using var wcmd = new SqlCommand($@"
+                DECLARE @hr int, @o int, @i int = 0, @n int, @b varbinary(max), @len bigint = 0;
+                SELECT @n = COUNT(*) FROM {stage};
+                EXEC @hr = sp_OACreate 'ADODB.Stream', @o OUT;
+                IF @hr <> 0 BEGIN RAISERROR('OLE create failed (0x%08X)', 16, 1, @hr); RETURN; END
+                EXEC sp_OASetProperty @o, 'Type', 1;
+                EXEC sp_OAMethod @o, 'Open';
+                WHILE @i < @n
+                BEGIN
+                    SELECT @b = DECOMPRESS(Data) FROM {stage} WHERE Seq = @i;
+                    EXEC @hr = sp_OAMethod @o, 'Write', NULL, @b;
+                    IF @hr <> 0 BEGIN EXEC sp_OADestroy @o; RAISERROR('OLE write failed (0x%08X)', 16, 1, @hr); RETURN; END
+                    SET @len += DATALENGTH(@b);
+                    SET @i += 1;
+                END
+                EXEC @hr = sp_OAMethod @o, 'SaveToFile', NULL, @path, 2;
+                EXEC sp_OAMethod @o, 'Close';
+                EXEC sp_OADestroy @o;
+                IF @hr <> 0 BEGIN RAISERROR('OLE save failed (0x%08X)', 16, 1, @hr); RETURN; END
+                SELECT @len;", tconn) { CommandTimeout = 900 };
+            wcmd.Parameters.AddWithValue("@path", targetPath);
+            var written = Convert.ToInt64(await wcmd.ExecuteScalarAsync());
+            if (written != raw)
+                throw new InvalidOperationException($"Backup copy was incomplete on the target ({written} of {raw} bytes).");
+        }
+        finally
+        {
+            try { await tconn.ExecuteAsync($"IF OBJECT_ID(N'{stage}') IS NOT NULL DROP TABLE {stage}", commandTimeout: 60); }
+            catch { /* best-effort; tempdb is cleared on restart anyway */ }
+        }
+    }
+
     // ── 1. Servers ────────────────────────────────────────────────
     public List<string> GetServers()
     {
@@ -250,24 +395,8 @@ public sealed class ProvisioningRepository
                 var tgtBackupDir = await ResolveFolderAsync(tconn, MappedFolder(targetServer, backup: true), defTgtBackupDir);
                 targetBak = tgtBackupDir + $"{newDbName}_{DateTime.Now:yyyyMMddHHmmss}.bak";
 
-                // 1) pull the .bak bytes off the source through its connection
-                Report("transfer", 38, "Downloading template backup…");
-                byte[] bakBytes;
-                await using (var read = MasterConnection(sourceServer))
-                {
-                    await read.OpenAsync();
-                    await using var rcmd = new SqlCommand(
-                        $"SELECT BulkColumn FROM OPENROWSET(BULK N'{backupPath.Replace("'", "''")}', SINGLE_BLOB) AS f", read)
-                        { CommandTimeout = 600 };
-                    var blob = await rcmd.ExecuteScalarAsync();
-                    if (blob is null or DBNull)
-                        return fail("Could not read the backup file back from the source server.");
-                    bakBytes = (byte[])blob;
-                }
-                Report("transfer", 52, $"Uploading backup to target ({bakBytes.Length / (1024 * 1024)} MB)…");
-
-                // 2) best-effort: enable OLE Automation on the target (Windows SQL). If it can't be enabled
-                //    (e.g. SQL on Linux), the write below throws with a clear message.
+                // 1) best-effort: enable OLE Automation on the target (Windows SQL). If it can't be enabled
+                //    (e.g. SQL on Linux), the final write throws with a clear message.
                 try
                 {
                     await tconn.ExecuteAsync(
@@ -277,24 +406,12 @@ public sealed class ProvisioningRepository
                 }
                 catch { /* surfaced by the write */ }
 
-                // 3) push the bytes onto the target's disk in ONE batch (OLE handles are batch-scoped)
+                // 2) streamed + compressed + pipelined copy: source → (8 MB chunks, gzip) → target staging
+                //    table, with download and upload overlapping. 3) target rebuilds the file (DECOMPRESS
+                //    each chunk → ADODB.Stream) in ONE batch (OLE handles are batch-scoped).
                 try
                 {
-                    await using var wcmd = new SqlCommand(@"
-                        DECLARE @hr int, @o int;
-                        EXEC @hr = sp_OACreate 'ADODB.Stream', @o OUT;
-                        IF @hr <> 0 BEGIN RAISERROR('OLE create failed (0x%08X)', 16, 1, @hr); RETURN; END
-                        EXEC sp_OASetProperty @o, 'Type', 1;
-                        EXEC sp_OAMethod @o, 'Open';
-                        EXEC sp_OAMethod @o, 'Write', NULL, @bytes;
-                        EXEC @hr = sp_OAMethod @o, 'SaveToFile', NULL, @path, 2;
-                        EXEC sp_OAMethod @o, 'Close';
-                        EXEC sp_OADestroy @o;
-                        IF @hr <> 0 BEGIN RAISERROR('OLE save failed (0x%08X)', 16, 1, @hr); RETURN; END", tconn)
-                        { CommandTimeout = 600 };
-                    wcmd.Parameters.Add("@bytes", SqlDbType.VarBinary, -1).Value = bakBytes;
-                    wcmd.Parameters.AddWithValue("@path", targetBak);
-                    await wcmd.ExecuteNonQueryAsync();
+                    await TransferBackupAsync(sourceServer, backupPath, tconn, targetBak, report);
                 }
                 catch (SqlException ex)
                 {
@@ -302,6 +419,10 @@ public sealed class ProvisioningRepository
                         $"Could not copy the backup onto {targetServer}. Cross-server provisioning needs OLE Automation " +
                         "on the target (a Windows SQL Server). If the target is SQL Server on Linux this path is unsupported — " +
                         $"provision on a Windows server, or pre-load the template onto the target. Details: {ex.Message}");
+                }
+                catch (InvalidOperationException ex)
+                {
+                    return fail(ex.Message);
                 }
 
                 restorePath = targetBak;   // now a LOCAL path on the target
