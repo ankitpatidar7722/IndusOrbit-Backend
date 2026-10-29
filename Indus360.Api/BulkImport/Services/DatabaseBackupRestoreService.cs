@@ -361,7 +361,19 @@ namespace Backend.Services
                 //    backend-side zip would NOT shrink that (only the already-fast API -> browser leg).
                 //    Best-effort: if xp_cmdshell/Compress-Archive is unavailable, transfer the raw .bak.
                 string? serverZipPath = null;
+                var parallelDone = false;
                 if (!nativeCompressed)
+                {
+                    // 2a) Fastest path: gzip 32 MB segments ON the server on several cores and pull each part
+                    //     back as soon as it is ready (compress || transfer || repackage). Falls back below.
+                    onProgress?.Invoke(40, "Compressing on server");
+                    var swPar = System.Diagnostics.Stopwatch.StartNew();
+                    parallelDone = await TryParallelServerCompressAsync(connectionString, conn, remoteBakPath,
+                        backupFileName, zipPath, onProgress, cancellationToken);
+                    if (parallelDone)
+                        Console.WriteLine($"[BackupRestore] parallel compress+transfer done in {swPar.Elapsed.TotalSeconds:F0}s");
+                }
+                if (!nativeCompressed && !parallelDone)
                 {
                     onProgress?.Invoke(45, "Compressing on server");
                     var swZip = System.Diagnostics.Stopwatch.StartNew();
@@ -379,12 +391,16 @@ namespace Backend.Services
                 }
 
                 // 3) Stream the smallest available file back and produce the local download .zip.
-                onProgress?.Invoke(75, "Downloading backup");
                 var swRead = System.Diagnostics.Stopwatch.StartNew();
-                if (serverZipPath != null)
+                if (parallelDone)
+                {
+                    // The local .zip was already built part-by-part in step 2a.
+                }
+                else if (serverZipPath != null)
                 {
                     // Server already produced a .zip (containing the .bak) - stream its bytes straight into
                     // our local .zip; it IS the download.
+                    onProgress?.Invoke(75, "Downloading backup");
                     await using var outFs = new FileStream(zipPath, FileMode.Create, FileAccess.Write,
                         FileShare.None, 1 << 20, useAsync: true);
                     await StreamRemoteFileAsync(conn, serverZipPath, outFs, cancellationToken);
@@ -392,6 +408,7 @@ namespace Backend.Services
                 else
                 {
                     // Raw .bak (native-compressed, or server-side zip unavailable): wrap it into a .zip here.
+                    onProgress?.Invoke(75, "Downloading backup");
                     var zipLevel = nativeCompressed ? CompressionLevel.NoCompression : CompressionLevel.Fastest;
                     using var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create);
                     var entry = zip.CreateEntry(backupFileName, zipLevel);
@@ -440,18 +457,157 @@ namespace Backend.Services
             await blob.CopyToAsync(dest, 4 << 20, ct); // 4 MB chunks
         }
 
+        private const int ParallelSegmentBytes = 32 * 1024 * 1024;
+
         /// <summary>
-        /// Best-effort: zip a .bak ON the SQL server (xp_cmdshell + PowerShell Compress-Archive) so far fewer
+        /// Gzips the .bak ON the SQL server in 32 MB segments on several cores (PowerShell runspace pool via
+        /// xp_cmdshell; each segment lands as "{bak}.p{i}.gz" once complete) while a second connection pulls
+        /// every finished part back in order, inflates it and writes it into the local .zip entry — so the
+        /// server-side compression, the transfer and the repackaging all overlap. Returns false (after
+        /// cleaning up) on any problem so the caller falls back to the single-file path. Never throws
+        /// except on cancellation.
+        /// </summary>
+        private static async Task<bool> TryParallelServerCompressAsync(string connectionString, SqlConnection conn,
+            string bakPath, string entryName, string zipPath, Action<int, string>? onProgress, CancellationToken ct)
+        {
+            var partGlob = bakPath + ".p*";
+            Task<List<string?>>? shellTask = null;
+            try
+            {
+                // Leave half the cores to the live SQL workload (max 4 workers).
+                var cpu = await conn.ExecuteScalarAsync<int?>("SELECT cpu_count FROM sys.dm_os_sys_info") ?? 2;
+                var workers = Math.Clamp(cpu / 2, 1, 4);
+
+                long? totalBytes = await conn.ExecuteScalarAsync<long?>(
+                    @"SELECT TOP 1 CAST(b.backup_size AS bigint) FROM msdb.dbo.backupset b
+                      JOIN msdb.dbo.backupmediafamily m ON m.media_set_id = b.media_set_id
+                      WHERE m.physical_device_name = @p ORDER BY b.backup_set_id DESC", new { p = bakPath });
+                var expectedParts = totalBytes is > 0 ? (int)Math.Ceiling(totalBytes.Value / (double)ParallelSegmentBytes) : 0;
+
+                var src = bakPath.Replace("'", "''");
+                var script =
+                    "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$src='" + src + "';$seg=" + ParallelSegmentBytes + ";" +
+                    "$len=(Get-Item -LiteralPath $src).Length;$cnt=[int][math]::Ceiling($len/$seg);" +
+                    "$pool=[runspacefactory]::CreateRunspacePool(1," + workers + ");$pool.Open();" +
+                    "$sb={param($src,$i,$seg);$fs=[IO.File]::Open($src,'Open','Read','ReadWrite');$fs.Position=[int64]$i*$seg;" +
+                    "$buf=New-Object byte[] $seg;$r=0;while($r -lt $seg){$k=$fs.Read($buf,$r,$seg-$r);if($k -le 0){break};$r+=$k};$fs.Dispose();" +
+                    "$tmp=$src+'.p'+$i+'.tmp';$o=[IO.File]::Create($tmp);" +
+                    "$g=New-Object IO.Compression.GZipStream($o,[IO.Compression.CompressionLevel]::Fastest);" +
+                    "$g.Write($buf,0,$r);$g.Dispose();$o.Dispose();[IO.File]::Move($tmp,$src+'.p'+$i+'.gz')};" +
+                    "$jobs=@();for($i=0;$i -lt $cnt;$i++){$p=[powershell]::Create();$p.RunspacePool=$pool;" +
+                    "[void]$p.AddScript($sb).AddArgument($src).AddArgument($i).AddArgument($seg);$jobs+=,@($p,$p.BeginInvoke())};" +
+                    "foreach($j in $jobs){[void]$j[0].EndInvoke($j[1]);$j[0].Dispose()};$pool.Close();'PARTS='+$cnt+';LEN='+$len";
+                shellTask = RunPowerShellAsync(connectionString, script, ct);
+
+                var next = 0;
+                using (var zip = ZipFile.Open(zipPath, ZipArchiveMode.Create))
+                {
+                    var entry = zip.CreateEntry(entryName, CompressionLevel.Fastest);
+                    await using var entryStream = entry.Open();
+                    while (true)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        var part = $"{bakPath}.p{next}.gz";
+                        if (await RemoteFileExistsAsync(conn, part, ct))
+                        {
+                            using (var gz = new MemoryStream())
+                            {
+                                await StreamRemoteFileAsync(conn, part, gz, ct);
+                                gz.Position = 0;
+                                await using var inflate = new GZipStream(gz, CompressionMode.Decompress);
+                                await inflate.CopyToAsync(entryStream, 1 << 20, ct);
+                            }
+                            next++;
+                            if (expectedParts > 0)
+                                onProgress?.Invoke(40 + (int)(55.0 * Math.Min(next, expectedParts) / expectedParts),
+                                    $"Compressing & downloading ({next}/{expectedParts})");
+                            continue;
+                        }
+                        if (shellTask.IsCompleted)
+                        {
+                            // The script may have finished between the existence check and now.
+                            if (await RemoteFileExistsAsync(conn, part, ct)) continue;
+                            break;
+                        }
+                        await Task.WhenAny(shellTask, Task.Delay(150, ct));
+                    }
+                }
+
+                var output = await shellTask;
+                // Search every output line (stderr/CLIXML noise can share a line with the result).
+                var m = output.Select(l => System.Text.RegularExpressions.Regex.Match(l ?? "", @"PARTS=(\d+);LEN=(\d+)"))
+                              .FirstOrDefault(x => x.Success);
+                if (m == null)
+                    throw new Exception("compression script failed: " + string.Join(" | ", output.Where(l => !string.IsNullOrWhiteSpace(l)).Take(5)));
+                var cnt = int.Parse(m.Groups[1].Value);
+                var len = long.Parse(m.Groups[2].Value);
+                // Every part must have been pulled back and the inflated size must equal the .bak's size.
+                long written;
+                using (var check = ZipFile.OpenRead(zipPath)) written = check.Entries[0].Length;
+                if (cnt == 0 || next != cnt || written != len)
+                    throw new Exception($"part mismatch (parts {next}/{cnt}, raw {written} of {len} bytes)");
+                var zipLen = new FileInfo(zipPath).Length;
+                Console.WriteLine($"[BackupRestore] parallel compress: {cnt} parts, {workers} workers, zip {zipLen / 1048576} MB");
+                return true;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[BackupRestore] parallel server compress failed ({ex.Message}) - falling back");
+                try { if (File.Exists(zipPath)) File.Delete(zipPath); } catch { /* best-effort */ }
+                return false;
+            }
+            finally
+            {
+                // Let the server script finish first so no part is written after the cleanup.
+                if (shellTask != null) { try { await shellTask; } catch { /* already handled */ } }
+                try
+                {
+                    await conn.ExecuteAsync(new CommandDefinition(
+                        $"EXEC master.dbo.xp_cmdshell 'del /q \"{partGlob.Replace("'", "''")}.gz\" \"{partGlob.Replace("'", "''")}.tmp\"', no_output",
+                        commandTimeout: 60));
+                }
+                catch (Exception ex) { Console.WriteLine($"[BackupRestore] part cleanup skipped: {ex.Message}"); }
+            }
+        }
+
+        /// <summary>Runs a PowerShell script on the SQL server (xp_cmdshell, -EncodedCommand = no quoting issues).</summary>
+        private static async Task<List<string?>> RunPowerShellAsync(string connectionString, string script, CancellationToken ct)
+        {
+            var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+            await using var c = new SqlConnection(connectionString);
+            await c.OpenAsync(ct);
+            var rows = await c.QueryAsync<string?>(new CommandDefinition(
+                $"EXEC master.dbo.xp_cmdshell 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}'",
+                commandTimeout: 1800, cancellationToken: ct));
+            return rows.ToList();
+        }
+
+        private static async Task<bool> RemoteFileExistsAsync(SqlConnection conn, string path, CancellationToken ct)
+        {
+            var exists = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
+                "DECLARE @e int; EXEC master.dbo.xp_fileexist @p, @e OUTPUT; SELECT @e;",
+                new { p = path }, commandTimeout: 30, cancellationToken: ct));
+            return exists == 1;
+        }
+
+        /// <summary>
+        /// Best-effort: zip a .bak ON the SQL server (xp_cmdshell + PowerShell .NET ZipArchive) so far fewer
         /// bytes cross the connection. Returns true only if the .zip was actually produced. Never throws.
-        /// Note: Compress-Archive caps a single entry at ~2 GB; a larger .bak just fails here and we fall back.
+        /// (.NET ZipArchive instead of Compress-Archive: no ~2 GB "Stream was too long" cap, ~2x faster.)
         /// </summary>
         private static async Task<bool> TryServerSideZipAsync(SqlConnection conn, string bakPath, string zipPath, CancellationToken ct)
         {
             try
             {
-                var psInner = $"Compress-Archive -LiteralPath '{bakPath}' -DestinationPath '{zipPath}' -CompressionLevel Fastest -Force";
-                var shellCmd = $"powershell -NoProfile -ExecutionPolicy Bypass -Command \"{psInner}\"";
-                var xp = "EXEC xp_cmdshell '" + shellCmd.Replace("'", "''") + "'";
+                var b = bakPath.Replace("'", "''");
+                var z = zipPath.Replace("'", "''");
+                var script = "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';Add-Type -AssemblyName System.IO.Compression.FileSystem;" +
+                             $"if(Test-Path -LiteralPath '{z}'){{Remove-Item -LiteralPath '{z}' -Force}};" +
+                             $"$z=[IO.Compression.ZipFile]::Open('{z}','Create');" +
+                             $"[void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($z,'{b}','{Path.GetFileName(bakPath).Replace("'", "''")}',[IO.Compression.CompressionLevel]::Fastest);$z.Dispose()";
+                var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+                var xp = $"EXEC xp_cmdshell 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {encoded}'";
                 await conn.ExecuteAsync(new CommandDefinition(xp, commandTimeout: 1800, cancellationToken: ct));
                 var len = await conn.ExecuteScalarAsync<long?>(
                     $"SELECT DATALENGTH(BulkColumn) FROM OPENROWSET(BULK N'{zipPath.Replace("'", "''")}', SINGLE_BLOB) AS x");

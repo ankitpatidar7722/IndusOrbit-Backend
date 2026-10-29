@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.AspNetCore.DataProtection;
 using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -81,6 +82,15 @@ builder.Services.AddScoped<TemplateStatusRepository>();
 builder.Services.AddScoped<SopStatusRepository>();
 builder.Services.AddScoped<AuditLogRepository>();
 builder.Services.AddScoped<LoginSessionRepository>();
+// Database Backup "remember password": keys persisted next to the app (survive restarts/redeploys),
+// encrypted at rest with Windows DPAPI (machine-bound).
+{
+    var dp = builder.Services.AddDataProtection()
+        .SetApplicationName("Indus360.Api")
+        .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "App_Data", "dp-keys")));
+    if (OperatingSystem.IsWindows()) dp.ProtectKeysWithDpapi(protectToLocalMachine: true);
+}
+builder.Services.AddScoped<SavedDbServerRepository>();
 builder.Services.AddScoped<Indus360.Api.Filters.AuditActionFilter>();
 builder.Services.AddScoped<AttachmentRepository>();
 // Client Kick-Off / Sign-Off finalized documents (save / view / download)

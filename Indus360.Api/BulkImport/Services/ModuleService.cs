@@ -1,16 +1,19 @@
 using Backend.DTOs;
 using Dapper;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Configuration;
 
 namespace Backend.Services;
 
 public class ModuleService : IModuleService
 {
     private readonly SqlConnection _connection;
+    private readonly IConfiguration _config;
 
-    public ModuleService(SqlConnection connection)
+    public ModuleService(SqlConnection connection, IConfiguration config)
     {
         _connection = connection;
+        _config = config;
     }
 
     public async Task<List<ModuleDto>> GetModulesByHeadNameAsync(string headName)
@@ -785,13 +788,14 @@ public class ModuleService : IModuleService
         _        => ("ItemGroupFieldMaster",   "ItemGroupFieldID",   "ItemGroupID",   "ItemGroupMaster",   "ItemGroupID",   "ItemGroupName"),
     };
 
-    /// <summary>Sub Module dropdown: the groups of the chosen master, from the Source catalog.</summary>
-    public async Task<List<FieldSubModuleDto>> GetFieldSubModulesAsync(string type)
+    /// <summary>Sub Module dropdown: the groups of the chosen master, from the Source catalog (template, or
+    /// the picked source client when sourceCompany is given).</summary>
+    public async Task<List<FieldSubModuleDto>> GetFieldSubModulesAsync(string type, string? sourceCompany = null)
     {
         var (_, _, _, groupTable, gIdCol, gNameCol) = FieldMeta(type);
         try
         {
-            using var src = new SqlConnection(IndusConnStr);
+            using var src = new SqlConnection(await SourceConnAsync(sourceCompany));
             var rows = await src.QueryAsync<dynamic>(
                 $"SELECT {gIdCol} AS ID, {gNameCol} AS NAME FROM {groupTable} WHERE ISNULL(IsDeletedTransaction,0)=0 ORDER BY {gNameCol}");
             return rows.Select(r => new FieldSubModuleDto { GroupId = Convert.ToInt32(r.ID), GroupName = r.NAME?.ToString() ?? "" })
@@ -805,13 +809,13 @@ public class ModuleService : IModuleService
     /// X-Target-Company). Matched by (GroupID + FieldName) — NOT by field id: a client DB holds the same
     /// field under its OWN identity value (source "Quality"=20 but client "Quality"=60), so an id match
     /// would wrongly report every field as "not in client".</summary>
-    public async Task<List<FieldComparisonDto>> GetFieldComparisonForClientAsync(string type, int groupId)
+    public async Task<List<FieldComparisonDto>> GetFieldComparisonForClientAsync(string type, int groupId, string? sourceCompany = null)
     {
         var (fTable, fIdCol, groupFkCol, _, _, _) = FieldMeta(type);
         var result = new List<FieldComparisonDto>();
         try
         {
-            using var src = new SqlConnection(IndusConnStr);
+            using var src = new SqlConnection(await SourceConnAsync(sourceCompany));
             var sourceRows = await src.QueryAsync<dynamic>(
                 $@"SELECT {fIdCol} AS ID, FieldName, FieldDisplayName, FieldDataType, FieldType
                    FROM {fTable} WHERE {groupFkCol} = @g AND ISNULL(IsDeletedTransaction,0)=0
@@ -863,11 +867,14 @@ public class ModuleService : IModuleService
     /// from Source (client auto-assigns a new id; the new field's FieldDrawSequence is appended AFTER the
     /// group's current max, so the client's existing field ORDER is never disturbed by an add); unticked+
     /// present → soft-delete. Reordering is a SEPARATE operation (see SaveFieldSequenceAsync).</summary>
-    public async Task<bool> SyncFieldsForClientAsync(string type, int groupId, List<FieldComparisonDto> syncData)
+    public async Task<bool> SyncFieldsForClientAsync(string type, int groupId, List<FieldComparisonDto> syncData, string? sourceCompany = null)
     {
         var (fTable, fIdCol, groupFkCol, _, _, _) = FieldMeta(type);
         try
         {
+            // Where to COPY new fields FROM: the picked source client, else the Indus template.
+            var sourceConnStr = await SourceConnAsync(sourceCompany);
+
             // Columns the client table actually has (schema-drift safety for the copy).
             var clientCols = (await _connection.QueryAsync<string>(
                 "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(@t)", new { t = fTable }))
@@ -893,7 +900,7 @@ public class ModuleService : IModuleService
                             $"UPDATE {fTable} SET IsDeletedTransaction = 0 WHERE {groupFkCol} = @g AND LTRIM(RTRIM(FieldName)) = @n", new { g = groupId, n = name });
                     else
                     {
-                        using var src = new SqlConnection(IndusConnStr);
+                        using var src = new SqlConnection(sourceConnStr);
                         var full = await src.QueryFirstOrDefaultAsync<dynamic>($"SELECT * FROM {fTable} WHERE {fIdCol} = @ID", new { ID = f.FieldId });
                         if (full != null)
                         {
@@ -977,4 +984,31 @@ public class ModuleService : IModuleService
         }
         return connectionString;
     }
+
+    // ── Selectable Source DB ──────────────────────────────────────────────────────────────────
+    // Dynamic Field Master normally reads fields from the shared Indus template (IndusEnterpriseKeyline).
+    // A caller may instead pass sourceCompany = another CLIENT's CompanyUserID, to copy that client's own
+    // fields (incl. ones added just for that client) into the destination. Falls back to the template when
+    // sourceCompany is empty / cannot be resolved.
+
+    /// <summary>Resolve a client's own DB connection string from its CompanyUserID (control DB).</summary>
+    private async Task<string?> ResolveClientConnStringAsync(string companyUserId)
+    {
+        if (string.IsNullOrWhiteSpace(companyUserId)) return null;
+        try
+        {
+            var controlCs = _config.GetConnectionString("IndusControl") ?? _config.GetConnectionString("IndusConnection");
+            if (string.IsNullOrEmpty(controlCs)) return null;
+            await using var ctrl = new SqlConnection(controlCs);
+            var cs = await ctrl.ExecuteScalarAsync<string?>(
+                "SELECT Conn_String FROM Indus_Company_Authentication_For_Web_Modules WHERE CompanyUserID = @cuid",
+                new { cuid = companyUserId.Trim() });
+            return string.IsNullOrWhiteSpace(cs) ? null : EnsureTrust(cs);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>The Source connection to read fields FROM: a picked source client's DB, else the template.</summary>
+    private async Task<string> SourceConnAsync(string? sourceCompany)
+        => (string.IsNullOrWhiteSpace(sourceCompany) ? null : await ResolveClientConnStringAsync(sourceCompany)) ?? IndusConnStr;
 }

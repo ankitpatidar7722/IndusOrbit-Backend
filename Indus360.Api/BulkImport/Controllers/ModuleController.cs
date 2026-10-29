@@ -379,29 +379,33 @@ public class ModuleController : ControllerBase
     // ── Dynamic Field Master ── target client DB = the X-Target-Company-resolved per-request connection
     // (so no connectionString in the body — the Bulk Import shell already picked the client). ──
 
-    /// <summary>Sub Module dropdown values (the chosen master's groups).</summary>
+    // sourceCompany (optional) = another CLIENT's CompanyUserID to read the fields FROM; blank = the Indus
+    // template (default). The destination client is still the X-Target-Company one.
+
+    /// <summary>Sub Module dropdown values (the chosen master's groups) — from the template or source client.</summary>
     [HttpGet("FieldSubModules")]
-    public async Task<IActionResult> GetFieldSubModules([FromQuery] string type)
+    public async Task<IActionResult> GetFieldSubModules([FromQuery] string type, [FromQuery] string? sourceCompany = null)
     {
-        try { return Ok(await _moduleService.GetFieldSubModulesAsync(type)); }
+        try { return Ok(await _moduleService.GetFieldSubModulesAsync(type, sourceCompany)); }
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
-    /// <summary>Grid: a group's fields from the Source, flagged by whether they also exist in the client.</summary>
+    /// <summary>Grid: a group's fields from the Source (template or source client), flagged by whether they
+    /// also exist in the destination client.</summary>
     [HttpGet("FieldComparisonForClient")]
-    public async Task<IActionResult> GetFieldComparisonForClient([FromQuery] string type, [FromQuery] int groupId)
+    public async Task<IActionResult> GetFieldComparisonForClient([FromQuery] string type, [FromQuery] int groupId, [FromQuery] string? sourceCompany = null)
     {
-        try { return Ok(await _moduleService.GetFieldComparisonForClientAsync(type, groupId)); }
+        try { return Ok(await _moduleService.GetFieldComparisonForClientAsync(type, groupId, sourceCompany)); }
         catch (Exception ex) { return StatusCode(500, new { error = ex.Message }); }
     }
 
-    /// <summary>Copy the ticked fields from Source into the client DB (soft-delete the unticked ones).</summary>
+    /// <summary>Copy the ticked fields from the Source into the destination client DB (soft-delete unticked).</summary>
     [HttpPost("SyncFieldsForClient")]
     public async Task<IActionResult> SyncFieldsForClient([FromBody] SyncFieldsRequest request)
     {
         try
         {
-            var ok = await _moduleService.SyncFieldsForClientAsync(request.Type, request.GroupId, request.SyncData);
+            var ok = await _moduleService.SyncFieldsForClientAsync(request.Type, request.GroupId, request.SyncData, request.SourceCompany);
             if (ok) return Ok(new { Message = "Fields synchronized successfully" });
             return BadRequest(new { Message = "Failed to synchronize fields" });
         }
@@ -413,6 +417,7 @@ public class ModuleController : ControllerBase
         public string Type { get; set; } = string.Empty;
         public int GroupId { get; set; }
         public List<FieldComparisonDto> SyncData { get; set; } = new();
+        public string? SourceCompany { get; set; }   // another client to copy fields FROM (blank = template)
     }
 
     /// <summary>The client's OWN fields for a group (destination DB) — for the Change Sequence screen.</summary>

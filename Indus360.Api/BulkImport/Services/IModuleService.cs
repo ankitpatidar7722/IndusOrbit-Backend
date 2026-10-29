@@ -36,9 +36,9 @@ public interface IModuleService
 
     // Dynamic Field Master — sync a group's FIELDS from the Source DB into the picked client's DB
     // (target = the injected per-request SqlConnection, resolved from X-Target-Company).
-    Task<List<FieldSubModuleDto>> GetFieldSubModulesAsync(string type);
-    Task<List<FieldComparisonDto>> GetFieldComparisonForClientAsync(string type, int groupId);
-    Task<bool> SyncFieldsForClientAsync(string type, int groupId, List<FieldComparisonDto> syncData);
+    Task<List<FieldSubModuleDto>> GetFieldSubModulesAsync(string type, string? sourceCompany = null);
+    Task<List<FieldComparisonDto>> GetFieldComparisonForClientAsync(string type, int groupId, string? sourceCompany = null);
+    Task<bool> SyncFieldsForClientAsync(string type, int groupId, List<FieldComparisonDto> syncData, string? sourceCompany = null);
     Task<bool> SaveFieldSequenceAsync(string type, int groupId, List<FieldComparisonDto> orderedFields);
     Task<List<FieldComparisonDto>> GetClientFieldsAsync(string type, int groupId);
 }

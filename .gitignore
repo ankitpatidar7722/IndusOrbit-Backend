@@ -34,3 +34,6 @@ debug_log.txt
 # ── OS ────────────────────────────────────────────
 Thumbs.db
 .DS_Store
+
+# Data Protection key ring (encrypts saved DB-server passwords) - server-local, never commit
+**/App_Data/dp-keys/
