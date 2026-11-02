@@ -91,6 +91,7 @@ builder.Services.AddScoped<LoginSessionRepository>();
     if (OperatingSystem.IsWindows()) dp.ProtectKeysWithDpapi(protectToLocalMachine: true);
 }
 builder.Services.AddScoped<SavedDbServerRepository>();
+builder.Services.AddSingleton<Indus360.Api.Services.BackupUploadService>();
 builder.Services.AddScoped<Indus360.Api.Filters.AuditActionFilter>();
 builder.Services.AddScoped<AttachmentRepository>();
 // Client Kick-Off / Sign-Off finalized documents (save / view / download)

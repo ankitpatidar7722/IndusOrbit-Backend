@@ -77,9 +77,12 @@ public sealed class ProvisioningRepository
     /// <paramref name="backup"/> is true, else its DataFolder (.mdf/.ldf). Null when the server isn't
     /// mapped, so the caller falls back to the SQL instance default.
     /// </summary>
-    private string? MappedFolder(string? server, bool backup)
+    private string? MappedFolder(string? server, bool backup) => MappedFolder(_cfg, server, backup);
+
+    /// <summary>Static form of <see cref="MappedFolder(string?, bool)"/> (also used by the backup upload/restore).</summary>
+    internal static string? MappedFolder(IConfiguration cfg, string? server, bool backup)
     {
-        var sec = ServerPaths.GetSection(HostKey(server));
+        var sec = cfg.GetSection("Provisioning:ServerPaths").GetSection(HostKey(server));
         if (!sec.Exists()) return null;
         var val = sec[backup ? "BackupFolder" : "DataFolder"];
         return string.IsNullOrWhiteSpace(val) ? null : val;
@@ -91,7 +94,7 @@ public sealed class ProvisioningRepository
     /// used on this server (e.g. the drive doesn't exist), fall back to <paramref name="instanceDefault"/>.
     /// Always returns a path with a trailing backslash.
     /// </summary>
-    private static async Task<string> ResolveFolderAsync(SqlConnection conn, string? configured, string instanceDefault)
+    internal static async Task<string> ResolveFolderAsync(SqlConnection conn, string? configured, string instanceDefault)
     {
         if (!string.IsNullOrWhiteSpace(configured))
         {

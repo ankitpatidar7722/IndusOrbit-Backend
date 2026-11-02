@@ -96,6 +96,8 @@ public sealed class EmailRepository
             size = a.Size ?? EstimateSize(a.Content),
         });
 
+        // SentAt is stored as India time: the prod SQL Server clock runs on UTC, so GETDATE() was 5:30 behind
+        // (the UI shows the stored value as-is). AT TIME ZONE gives IST regardless of the server's own zone.
         const string sql = @"
             INSERT INTO app.EmailHistory
               (Recipients, ToJson, CcJson, BccJson, Subject, BodyHtml, BodyText, AttachmentsJson,
@@ -103,7 +105,7 @@ public sealed class EmailRepository
             OUTPUT INSERTED.Id
             VALUES
               (@Recipients, @ToJson, @CcJson, @BccJson, @Subject, @BodyHtml, @BodyText, @AttachmentsJson,
-               @ClientCode, @ClientName, @PointId, @TicketId, @Module, @Provider, @Status, @ErrorMessage, @SentByEmail, @SentByName, GETDATE());";
+               @ClientCode, @ClientName, @PointId, @TicketId, @Module, @Provider, @Status, @ErrorMessage, @SentByEmail, @SentByName, CAST(SYSDATETIMEOFFSET() AT TIME ZONE 'India Standard Time' AS datetime));";
 
         await using var db = await _db.OpenAsync();
         return await db.ExecuteScalarAsync<int>(sql, new

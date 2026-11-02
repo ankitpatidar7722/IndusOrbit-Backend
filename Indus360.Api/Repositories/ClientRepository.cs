@@ -613,7 +613,11 @@ public sealed class ClientRepository
             return (false, "Your account has no email on file, so it can't be matched to an IndusInternalApp employee.");
 
         // 2) The tracker row → worklog Title + Description (Default conn, app schema).
+        // Worklog date = India "today", except a Training row goes on its Schedule Date (so a past
+        // session lands on that day's worklog, not today's).
         string title = "", description = "";
+        var workDate = IstToday();
+        decimal hours = 0;   // Training: End Time − Start Time; others stay 0 (filled in the Internal App)
         await using (var app = await _db.OpenAsync())
         {
             if (entity == "milestone")
@@ -626,8 +630,14 @@ public sealed class ClientRepository
             }
             else if (entity == "training")
             {
-                var r = await app.QuerySingleOrDefaultAsync("SELECT ModuleName, SubModule, Details FROM app.TrainingUpdates WHERE Id=@rowId AND ClientCode=@clientCode AND ISNULL(IsDeletedTransaction,0)=0", new { rowId, clientCode });
+                var r = await app.QuerySingleOrDefaultAsync("SELECT ModuleName, SubModule, Details, LogDate, StartTime, EndTime FROM app.TrainingUpdates WHERE Id=@rowId AND ClientCode=@clientCode AND ISNULL(IsDeletedTransaction,0)=0", new { rowId, clientCode });
                 if (r is null) return (false, "Training row not found.");
+                string sched = Convert.ToString((object?)r.LogDate)?.Trim() ?? "";
+                if (sched.Length >= 10 && DateTime.TryParseExact(sched[..10], "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out DateTime sd))
+                    workDate = sd.Date;
+                else if (sched != "" && DateTime.TryParse(sched, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out DateTime sd2))
+                    workDate = sd2.Date;
+                hours = HoursBetween(Convert.ToString((object?)r.StartTime), Convert.ToString((object?)r.EndTime));
                 title = ((string?)r.ModuleName ?? "").Trim();
                 var sub = ((string?)r.SubModule ?? "").Trim();
                 var det = ((string?)r.Details ?? "").Trim();
@@ -643,6 +653,7 @@ public sealed class ClientRepository
             else return (false, "Unknown tracker entity.");
         }
         if (string.IsNullOrWhiteSpace(title)) title = projectLabel != "" ? projectLabel : "Tracker task";
+        var dayLabel = workDate == IstToday() ? "today" : workDate.ToString("dd-MMM-yyyy");
 
         // 3) IndusInternalApp DB (IndusApp conn): resolve employee, find-or-create today's Draft, append entry.
         await using (var hr = await _db.OpenAppDbAsync())
@@ -655,12 +666,12 @@ public sealed class ClientRepository
             int? projectId = projectLabel == "" ? null
                 : await hr.ExecuteScalarAsync<int?>("SELECT TOP 1 ProjectID FROM dbo.Projects WHERE IsDeleted=0 AND ProjectName=@n ORDER BY ProjectID", new { n = projectLabel });
 
-            var existing = await hr.QuerySingleOrDefaultAsync("SELECT WorkLogID, Status FROM dbo.DailyWorkLog WHERE EmployeeID=@e AND WorkDate=CAST(GETDATE() AS date)", new { e = empId });
+            var existing = await hr.QuerySingleOrDefaultAsync("SELECT WorkLogID, Status FROM dbo.DailyWorkLog WHERE EmployeeID=@e AND WorkDate=@d", new { e = empId, d = workDate });
             int workLogId;
             if (existing is not null)
             {
                 if (string.Equals((string?)existing.Status, "Approved", StringComparison.OrdinalIgnoreCase))
-                    return (false, "Today's worklog is already approved and can no longer be edited.");
+                    return (false, $"The worklog for {dayLabel} is already approved and can no longer be edited.");
                 workLogId = (int)existing.WorkLogID;
             }
             else
@@ -668,13 +679,13 @@ public sealed class ClientRepository
                 workLogId = await hr.ExecuteScalarAsync<int>(@"
                     INSERT INTO dbo.DailyWorkLog (EmployeeID, WorkDate, Status, CreatedAt)
                     OUTPUT INSERTED.WorkLogID
-                    VALUES (@e, CAST(GETDATE() AS date), 'Draft', GETDATE());", new { e = empId });
+                    VALUES (@e, @d, 'Draft', GETDATE());", new { e = empId, d = workDate });
             }
 
             await hr.ExecuteAsync(@"
                 INSERT INTO dbo.DailyWorkEntry (WorkLogID, Title, Description, Category, ProjectID, ProjectLabel, TaskID, Hours, ProjectTimeLogID, CreatedAt)
-                VALUES (@W, @Title, @Desc, NULL, @P, @PL, NULL, 0, NULL, GETDATE());",
-                new { W = workLogId, Title = title, Desc = string.IsNullOrWhiteSpace(description) ? null : description.Trim(),
+                VALUES (@W, @Title, @Desc, NULL, @P, @PL, NULL, @H, NULL, GETDATE());",
+                new { W = workLogId, H = hours, Title = title, Desc = string.IsNullOrWhiteSpace(description) ? null : description.Trim(),
                       P = projectId, PL = projectId.HasValue ? (string?)null : (projectLabel == "" ? null : projectLabel) });
         }
 
@@ -684,7 +695,24 @@ public sealed class ClientRepository
             await using (var app = await _db.OpenAsync())
                 await app.ExecuteAsync($"UPDATE app.{table} SET Tasked=1, ModifiedBy=@u, ModifiedDate=SYSDATETIME() WHERE Id=@rowId", new { rowId, u = actingUserId });
 
-        return (true, "Added to today's Draft worklog.");
+        return (true, $"Added to {(dayLabel == "today" ? "today's" : dayLabel)} Draft worklog.");
+    }
+
+    /// <summary>Hours between two "HH:mm" times, rounded to 2 decimals (14:00 → 16:30 = 2.5).
+    /// 0 when either is missing/invalid or End is not after Start.</summary>
+    private static decimal HoursBetween(string? start, string? end)
+    {
+        if (!TimeSpan.TryParse((start ?? "").Trim(), System.Globalization.CultureInfo.InvariantCulture, out var a)) return 0;
+        if (!TimeSpan.TryParse((end ?? "").Trim(), System.Globalization.CultureInfo.InvariantCulture, out var b)) return 0;
+        var mins = (b - a).TotalMinutes;
+        return mins > 0 ? Math.Round((decimal)mins / 60m, 2) : 0;
+    }
+
+    /// <summary>Today's date in India time — the API host / SQL clocks may run on UTC.</summary>
+    private static DateTime IstToday()
+    {
+        try { return TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTime.UtcNow, "India Standard Time").Date; }
+        catch { return DateTime.UtcNow.AddMinutes(330).Date; }
     }
 
     // ---------------- Support ----------------

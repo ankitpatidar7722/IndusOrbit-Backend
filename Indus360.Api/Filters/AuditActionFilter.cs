@@ -31,7 +31,9 @@ public sealed class AuditActionFilter : IAsyncActionFilter
     private static readonly string[] SkipContains =
         { "heartbeat", "negotiate", "/hub", "/audit-log", "push/subscribe", "push/unsubscribe", "/health",
           // login + session tracking record their own rich audit entries (see Auth/SessionsController)
-          "/auth/login", "employee-auth/login", "/sessions/" };
+          "/auth/login", "employee-auth/login", "/sessions/",
+          // .bak upload chunks (one request per 8 MB — start/complete/restore are still audited)
+          "/database-backup/upload-chunk/" };
 
     // Read-only endpoints that happen to be POST (they take a client connection string in the body) but
     // mutate nothing — listing a client's modules / catalog when the Module Settings modal opens. Logging
