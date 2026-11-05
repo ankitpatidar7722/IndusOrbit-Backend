@@ -178,6 +178,7 @@ public class OnsiteVisit : AuditFields
     public int Id { get; set; }
     public string ClientCode { get; set; } = "";
     public string Person { get; set; } = "";               // Person Name
+    public string? Designation { get; set; }               // auto-filled from the user's Role
     public string? Age { get; set; }
     public string? MobileNo { get; set; }
     public string? Location { get; set; }
@@ -187,7 +188,9 @@ public class OnsiteVisit : AuditFields
     public string? TicketCharge { get; set; }              // Tickets
     public string? HotelCharge { get; set; }
     public string? FoodCharge { get; set; }
-    public string? SiteCharge { get; set; }
+    public string? SiteCharge { get; set; }                // per day
+    public string? Salary { get; set; }
+    public string? TotalAmount { get; set; }               // Site Charge × Days + Salary (editable)
     public string Status { get; set; } = "Planned";
     public bool Emailed { get; set; }
 }

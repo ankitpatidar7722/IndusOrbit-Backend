@@ -258,6 +258,14 @@ namespace Backend.Services
                     _resultZips[operationId] = zipPath;
                     UpdateOperationStatus(operationId, "Complete", 100, "Backup ready to download",
                         isComplete: true, success: true);
+                    // Never downloaded (tab closed etc.)? Remove THIS zip from the API host after 2 hours.
+                    // Once /download takes it, TryRemove fails here and the download's own cleanup applies.
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(TimeSpan.FromHours(2));
+                        if (_resultZips.TryRemove(operationId, out var stale))
+                            try { if (File.Exists(stale)) File.Delete(stale); } catch { /* best-effort */ }
+                    });
                 }
                 catch (Exception ex)
                 {
@@ -328,6 +336,14 @@ namespace Backend.Services
                 var remoteBakPath = serverBackupDir + backupFileName;
                 var remoteBakEsc = remoteBakPath.Replace("'", "''");
 
+                // Temp files THIS backup creates on the SQL server (.bak + optional server-side .zip) are
+                // removed in `finally` — also when the backup fails half-way. Only these exact names are
+                // ever deleted; other backups in the same folder are never touched.
+                string? serverZipPath = null;
+                var succeeded = false;
+                try
+                {
+
                 var swTotal = System.Diagnostics.Stopwatch.StartNew();
 
                 // 1) Fresh COPY_ONLY backup. Try native backup COMPRESSION first (a compressed .bak is far
@@ -360,7 +376,6 @@ namespace Backend.Services
                 //    SERVER so we transfer far fewer bytes back. The slow leg is SQL server -> API; a
                 //    backend-side zip would NOT shrink that (only the already-fast API -> browser leg).
                 //    Best-effort: if xp_cmdshell/Compress-Archive is unavailable, transfer the raw .bak.
-                string? serverZipPath = null;
                 var parallelDone = false;
                 if (!nativeCompressed)
                 {
@@ -423,11 +438,6 @@ namespace Backend.Services
                     throw new Exception($"ZIP file was not created or is empty: {zipPath}");
                 Console.WriteLine($"[BackupRestore] ZIP ready: {zipPath} ({zipInfo.Length / 1024 / 1024} MB), TOTAL {swTotal.Elapsed.TotalSeconds:F0}s");
 
-                // 4) Best-effort delete of temp files left on the SQL server (not fatal if it fails).
-                await TryDeleteRemoteFileAsync(conn, remoteBakPath, cancellationToken);
-                if (serverZipPath != null)
-                    await TryDeleteRemoteFileAsync(conn, serverZipPath, cancellationToken);
-
                 await _activityLog.LogActivityAsync(new CreateActivityLogRequest
                 {
                     ActionType = "Download Compressed Backup",
@@ -436,7 +446,26 @@ namespace Backend.Services
                     NewValue = databaseName
                 });
 
+                succeeded = true;
                 return zipPath;
+                }
+                finally
+                {
+                    // 4) Best-effort delete of this backup's temp files on the SQL server (fresh connection —
+                    //    the main one may be broken if the failure was a dropped connection).
+                    try
+                    {
+                        using var cleanConn = new SqlConnection(connectionString);
+                        await cleanConn.OpenAsync();
+                        await TryDeleteRemoteFileAsync(cleanConn, remoteBakPath, CancellationToken.None);
+                        if (serverZipPath != null)
+                            await TryDeleteRemoteFileAsync(cleanConn, serverZipPath, CancellationToken.None);
+                    }
+                    catch (Exception cex) { Console.WriteLine($"[BackupRestore] temp cleanup skipped: {cex.Message}"); }
+                    // A failed run never hands its half-written local .zip to anyone — remove it too.
+                    if (!succeeded)
+                        try { if (File.Exists(zipPath)) File.Delete(zipPath); } catch { /* best-effort */ }
+                }
             }
             catch (Exception ex)
             {

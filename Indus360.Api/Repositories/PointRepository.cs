@@ -74,6 +74,55 @@ public sealed class PointRepository
         return await db.QuerySingleAsync<AdminDashboardStats>(sql, new { from, to, devId, custId });
     }
 
+    /// <summary>Implementor Dashboard: status counters + per-assignee split for the points a user added.
+    /// <paramref name="reportedBy"/> null = everyone's points (admin). Open here means "still pending",
+    /// i.e. not Closed and not Rejected, so Total = Open + Closed + Reject.</summary>
+    public async Task<ImplementorDashboard> GetImplementorDashboardAsync(DateTime? from, DateTime? to, int? reportedBy, int? custId)
+    {
+        const string where = @"
+            WHERE ISNULL(p.IsDeletedTransaction,0) = 0
+              AND (@from IS NULL OR p.DateCreated >= @from)
+              AND (@to   IS NULL OR p.DateCreated < DATEADD(DAY,1,@to))
+              AND (@reportedBy IS NULL OR p.ReportedByID = @reportedBy)
+              AND (@custId IS NULL OR p.CustomerID = @custId)";
+        const string sql = @"
+            SELECT
+              COUNT(*) AS Total,
+              SUM(CASE WHEN p.Status='Queue' THEN 1 ELSE 0 END) AS Queue,
+              SUM(CASE WHEN p.Status='Assigned' THEN 1 ELSE 0 END) AS Assigned,
+              SUM(CASE WHEN p.Status='In Progress' THEN 1 ELSE 0 END) AS InProgress,
+              SUM(CASE WHEN p.Status='DevCompleted' THEN 1 ELSE 0 END) AS DevCompleted,
+              SUM(CASE WHEN p.Status='PendingSupport' THEN 1 ELSE 0 END) AS PendingSupport,
+              SUM(CASE WHEN p.Status='SupportVerified' THEN 1 ELSE 0 END) AS SupportVerified,
+              SUM(CASE WHEN p.Status='PendingMerge' THEN 1 ELSE 0 END) AS PendingMerge,
+              SUM(CASE WHEN p.Status='PendingQC' THEN 1 ELSE 0 END) AS PendingQC,
+              SUM(CASE WHEN p.Status='In-Testing' THEN 1 ELSE 0 END) AS InTesting,
+              SUM(CASE WHEN p.Status='Testing-Completed' THEN 1 ELSE 0 END) AS TestingCompleted,
+              SUM(CASE WHEN p.Status='ReOpened' THEN 1 ELSE 0 END) AS ReOpened,
+              SUM(CASE WHEN p.Status='Hold' THEN 1 ELSE 0 END) AS Hold,
+              SUM(CASE WHEN p.Status='Reject' THEN 1 ELSE 0 END) AS Reject,
+              SUM(CASE WHEN p.Status='Closed' THEN 1 ELSE 0 END) AS Closed,
+              SUM(CASE WHEN ISNULL(p.ExpectedMinutes,0) > 0 AND ISNULL(p.TotalTimeSpent,0) > p.ExpectedMinutes THEN 1 ELSE 0 END) AS Delayed,
+              SUM(CASE WHEN p.Status NOT IN ('Closed','Reject') THEN 1 ELSE 0 END) AS [Open]
+            FROM dbo.Points p" + where + @";
+
+            SELECT p.AssignedToID,
+                   MAX(ISNULL(u.FullName, CASE WHEN p.AssignedToID IS NULL THEN 'Not Assigned' ELSE 'Unknown User' END)) AS AssignedToName,
+                   COUNT(*) AS Total,
+                   SUM(CASE WHEN p.Status NOT IN ('Closed','Reject') THEN 1 ELSE 0 END) AS Pending,
+                   SUM(CASE WHEN p.Status='Closed' THEN 1 ELSE 0 END) AS Closed,
+                   SUM(CASE WHEN p.Status='Reject' THEN 1 ELSE 0 END) AS Rejected
+            FROM dbo.Points p
+            LEFT JOIN app.Users u ON u.UserId = p.AssignedToID" + where + @"
+            GROUP BY p.AssignedToID
+            ORDER BY Total DESC";
+        await using var db = await _db.OpenTmsAsync();
+        using var multi = await db.QueryMultipleAsync(sql, new { from, to, reportedBy, custId });
+        var stats = await multi.ReadSingleAsync<AdminDashboardStats>();
+        var assignees = (await multi.ReadAsync<ImplementorAssigneeRow>()).ToList();
+        return new ImplementorDashboard { Stats = stats, Assignees = assignees };
+    }
+
     /// <summary>Filtered points for a grid (mirrors DataAccess.GetFilteredPointsForGrid).
     /// When <paramref name="status"/> is null/"All" no status filter is applied.
     /// <paramref name="reportedBy"/> scopes to a support user's own reported points.</summary>

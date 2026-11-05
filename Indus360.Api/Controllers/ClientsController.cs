@@ -159,6 +159,9 @@ public class ClientsController : ControllerBase
     public async Task<IActionResult> DeleteSupport(int id) => await _repo.DeleteSupportAsync(id, this.CurrentUserId()) ? NoContent() : NotFound();
 
     // -------- Onsite --------
+    [HttpGet("onsite/all")]
+    public async Task<IActionResult> AllOnsite() => Ok(await _repo.GetAllOnsiteAsync());
+
     [HttpPost("{code}/onsite")]
     public async Task<IActionResult> AddOnsite(string code, [FromBody] OnsiteVisit o)
     { o.ClientCode = code; o.CreatedBy = this.CurrentUserId(); o.Id = await _repo.AddOnsiteAsync(o); return Ok(o); }

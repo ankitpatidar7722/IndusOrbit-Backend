@@ -47,6 +47,22 @@ public sealed class PmCategory
 
 // ----- Dashboard -----
 /// <summary>Status counters for the admin dashboard stat cards (mirrors DashboardAdmin.LoadDashboardStats).</summary>
+public sealed class ImplementorAssigneeRow
+{
+    public int? AssignedToID { get; set; }
+    public string AssignedToName { get; set; } = "";
+    public int Total { get; set; }
+    public int Pending { get; set; }
+    public int Closed { get; set; }
+    public int Rejected { get; set; }
+}
+
+public sealed class ImplementorDashboard
+{
+    public AdminDashboardStats Stats { get; set; } = new();
+    public List<ImplementorAssigneeRow> Assignees { get; set; } = new();
+}
+
 public sealed class AdminDashboardStats
 {
     public int Total { get; set; }

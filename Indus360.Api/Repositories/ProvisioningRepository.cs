@@ -348,7 +348,13 @@ public sealed class ProvisioningRepository
             if (exists > 0) sourceServer = targetServer;
         }
 
-        string backupPath;
+        // The temp .bak files THIS run creates — the only files the cleanup below ever touches (existing
+        // backups in the same folders are never deleted). Removed in `finally`, so they go away even when
+        // the setup fails half-way (backup error, transfer error, DB already exists, restore error).
+        string? backupPath = null;
+        string? targetBak = null;   // cross-server: the .bak we land on the target
+        try
+        {
         // C) BACKUP the template on the source server
         await using (var sconn = MasterConnection(sourceServer))
         {
@@ -376,9 +382,8 @@ public sealed class ProvisioningRepository
         //    (ADODB.Stream) — no file sharing needed. OLE handles are batch-scoped, so the whole file is
         //    written in one batch as a single varbinary(max) parameter. Needs OLE Automation on the target
         //    (Windows SQL Server); SQL-on-Linux can't do this — such a target must be pre-loaded instead.
-        var restorePath = backupPath;
+        var restorePath = backupPath!;
         var isCrossServer = sourceServer != targetServer;
-        string? targetBak = null;   // cross-server: the .bak we land on the target (cleaned up at the end)
 
         // E) RESTORE on the target server
         await using (var tconn = MasterConnection(targetServer))
@@ -414,7 +419,7 @@ public sealed class ProvisioningRepository
                 //    each chunk → ADODB.Stream) in ONE batch (OLE handles are batch-scoped).
                 try
                 {
-                    await TransferBackupAsync(sourceServer, backupPath, tconn, targetBak, report);
+                    await TransferBackupAsync(sourceServer, backupPath!, tconn, targetBak, report);
                 }
                 catch (SqlException ex)
                 {
@@ -470,23 +475,31 @@ public sealed class ProvisioningRepository
 
         Report("finalize", 98, "Finalizing…");
 
-        // F) best-effort cleanup of the .bak files (non-critical). xp_delete_file needs no xp_cmdshell.
-        try
-        {
-            await using var clean = MasterConnection(sourceServer);
-            await clean.OpenAsync();
-            await clean.ExecuteAsync($"EXEC master.dbo.xp_delete_file 0, N'{backupPath.Replace("'", "''")}'", commandTimeout: 30);
         }
-        catch { /* non-critical */ }
-        if (targetBak is not null)
+        finally
         {
-            try
+            // F) best-effort cleanup of THIS run's temp .bak files only (non-critical; xp_delete_file needs
+            //    no xp_cmdshell and deletes just the one named file).
+            if (backupPath is not null)
             {
-                await using var cleanT = MasterConnection(targetServer);
-                await cleanT.OpenAsync();
-                await cleanT.ExecuteAsync($"EXEC master.dbo.xp_delete_file 0, N'{targetBak.Replace("'", "''")}'", commandTimeout: 30);
+                try
+                {
+                    await using var clean = MasterConnection(sourceServer);
+                    await clean.OpenAsync();
+                    await clean.ExecuteAsync($"EXEC master.dbo.xp_delete_file 0, N'{backupPath.Replace("'", "''")}'", commandTimeout: 30);
+                }
+                catch { /* non-critical */ }
             }
-            catch { /* non-critical */ }
+            if (targetBak is not null)
+            {
+                try
+                {
+                    await using var cleanT = MasterConnection(targetServer);
+                    await cleanT.OpenAsync();
+                    await cleanT.ExecuteAsync($"EXEC master.dbo.xp_delete_file 0, N'{targetBak.Replace("'", "''")}'", commandTimeout: 30);
+                }
+                catch { /* non-critical */ }
+            }
         }
 
         // G) build & return the new client connection string

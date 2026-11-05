@@ -187,6 +187,12 @@ public sealed class ClientRepository
         for (int i = 1; i < rows.Count; i++)
             planned[i] = AddSkippingSundays(planned[i - 1], ParseDays(rows[i].TaskTimeline));
 
+        // The database has just been created, so the "Database Configuration" phase is done too: Actual/End =
+        // today + Complete, and its Res. Person is the user who created the database (Order Date keeps the sales person).
+        var creatorName = actorUserId is null ? null
+            : await db.ExecuteScalarAsync<string?>("SELECT FullName FROM app.Users WHERE UserId=@id", new { id = actorUserId });
+        static bool IsDbConfig(Milestone m) => string.Equals((m.Name ?? "").Trim(), "Database Configuration", StringComparison.OrdinalIgnoreCase);
+
         for (int i = 0; i < rows.Count; i++)
         {
             if (i == 0)
@@ -194,6 +200,15 @@ public sealed class ClientRepository
                     ResPerson=@res, Status='Complete', TimelineVarianceStatus='On Time', StartDateVariance='0',
                     ModifiedBy=@mod, ModifiedDate=SYSDATETIME() WHERE Id=@id",
                     new { p = Iso(planned[0]), res = salesPerson, mod = actorUserId, id = rows[0].Id });
+            else if (IsDbConfig(rows[i]))
+            {
+                var variance = (int)(today - planned[i]).TotalDays;
+                await db.ExecuteAsync(@"UPDATE app.Milestones SET PlannedDate=@p, ActualDate=@a, EndDate=@a,
+                    ResPerson=@res, Status='Complete', TimelineVarianceStatus=@tvs, StartDateVariance=@var,
+                    ModifiedBy=@mod, ModifiedDate=SYSDATETIME() WHERE Id=@id",
+                    new { p = Iso(planned[i]), a = Iso(today), res = string.IsNullOrWhiteSpace(creatorName) ? salesPerson : creatorName.Trim(), tvs = variance > 0 ? "Delayed" : "On Time",
+                          var = variance.ToString(), mod = actorUserId, id = rows[i].Id });
+            }
             else
                 await db.ExecuteAsync(
                     "UPDATE app.Milestones SET PlannedDate=@p, ModifiedBy=@mod, ModifiedDate=SYSDATETIME() WHERE Id=@id",
@@ -732,23 +747,44 @@ public sealed class ClientRepository
     public async Task<bool> DeleteSupportAsync(int id, int? userId) => await DeleteAsync("SupportLogs", id, userId);
 
     // ---------------- Onsite ----------------
+    /// <summary>Every client's onsite visits (the "All Clients" view); the UI scopes them to the user's clients.</summary>
+    public async Task<List<OnsiteVisit>> GetAllOnsiteAsync()
+    {
+        await using var db = await _db.OpenAsync();
+        return (await db.QueryAsync<OnsiteVisit>("SELECT * FROM app.OnsiteVisits WHERE ISNULL(IsDeletedTransaction,0)=0 ORDER BY Id DESC")).ToList();
+    }
+    // Designation / Salary / TotalAmount were added later — created on first write (once per process), so no manual DB step.
+    private static volatile bool _onsiteColsReady;
+    private static async Task EnsureOnsiteColumnsAsync(System.Data.IDbConnection db)
+    {
+        if (_onsiteColsReady) return;
+        await db.ExecuteAsync(@"
+            IF COL_LENGTH('app.OnsiteVisits','Designation') IS NULL ALTER TABLE app.OnsiteVisits ADD Designation nvarchar(150) NULL;
+            IF COL_LENGTH('app.OnsiteVisits','Salary') IS NULL ALTER TABLE app.OnsiteVisits ADD Salary nvarchar(50) NULL;
+            IF COL_LENGTH('app.OnsiteVisits','TotalAmount') IS NULL ALTER TABLE app.OnsiteVisits ADD TotalAmount nvarchar(50) NULL;");
+        _onsiteColsReady = true;
+    }
+
     public async Task<int> AddOnsiteAsync(OnsiteVisit o)
     {
         const string sql = @"INSERT INTO app.OnsiteVisits
-            (ClientCode,Person,Age,MobileNo,Location,FromDate,ToDate,Days,TicketCharge,HotelCharge,FoodCharge,SiteCharge,Status,Emailed,CreatedBy)
+            (ClientCode,Person,Designation,Age,MobileNo,Location,FromDate,ToDate,Days,TicketCharge,HotelCharge,FoodCharge,SiteCharge,Salary,TotalAmount,Status,Emailed,CreatedBy)
             OUTPUT INSERTED.Id VALUES
-            (@ClientCode,@Person,@Age,@MobileNo,@Location,@FromDate,@ToDate,@Days,@TicketCharge,@HotelCharge,@FoodCharge,@SiteCharge,@Status,@Emailed,@CreatedBy);";
+            (@ClientCode,@Person,@Designation,@Age,@MobileNo,@Location,@FromDate,@ToDate,@Days,@TicketCharge,@HotelCharge,@FoodCharge,@SiteCharge,@Salary,@TotalAmount,@Status,@Emailed,@CreatedBy);";
         await using var db = await _db.OpenAsync();
+        await EnsureOnsiteColumnsAsync(db);
         return await db.ExecuteScalarAsync<int>(sql, o);
     }
     public async Task<bool> UpdateOnsiteAsync(OnsiteVisit o)
     {
+        // ClientCode comes from the route — the "All Clients" view can move a visit to another client.
         const string sql = @"UPDATE app.OnsiteVisits SET
-            Person=@Person,Age=@Age,MobileNo=@MobileNo,Location=@Location,FromDate=@FromDate,ToDate=@ToDate,
-            Days=@Days,TicketCharge=@TicketCharge,HotelCharge=@HotelCharge,FoodCharge=@FoodCharge,SiteCharge=@SiteCharge,Status=@Status,Emailed=@Emailed,
-            ModifiedBy=@ModifiedBy,ModifiedDate=SYSDATETIME()
+            ClientCode=@ClientCode,Person=@Person,Designation=@Designation,Age=@Age,MobileNo=@MobileNo,Location=@Location,FromDate=@FromDate,ToDate=@ToDate,
+            Days=@Days,TicketCharge=@TicketCharge,HotelCharge=@HotelCharge,FoodCharge=@FoodCharge,SiteCharge=@SiteCharge,Salary=@Salary,TotalAmount=@TotalAmount,
+            Status=@Status,Emailed=@Emailed,ModifiedBy=@ModifiedBy,ModifiedDate=SYSDATETIME()
             WHERE Id=@Id;";
         await using var db = await _db.OpenAsync();
+        await EnsureOnsiteColumnsAsync(db);
         return await db.ExecuteAsync(sql, o) > 0;
     }
     public async Task<bool> DeleteOnsiteAsync(int id, int? userId) => await DeleteAsync("OnsiteVisits", id, userId);

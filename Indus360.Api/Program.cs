@@ -79,6 +79,7 @@ builder.Services.AddScoped<TmsReportRepository>();
 builder.Services.AddScoped<TmsAdminRepository>();
 builder.Services.AddScoped<NotificationRepository>();
 builder.Services.AddScoped<TemplateStatusRepository>();
+builder.Services.AddScoped<TrackerAttachmentRepository>();   // Tracker row attachments (signed training sheets etc.)
 builder.Services.AddScoped<SopStatusRepository>();
 builder.Services.AddScoped<AuditLogRepository>();
 builder.Services.AddScoped<LoginSessionRepository>();

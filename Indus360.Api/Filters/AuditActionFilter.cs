@@ -32,6 +32,8 @@ public sealed class AuditActionFilter : IAsyncActionFilter
         { "heartbeat", "negotiate", "/hub", "/audit-log", "push/subscribe", "push/unsubscribe", "/health",
           // login + session tracking record their own rich audit entries (see Auth/SessionsController)
           "/auth/login", "employee-auth/login", "/sessions/",
+          // forgot-password OTP flow — bodies carry the OTP / new password, which must never be stored
+          "/auth/forgot-password", "/auth/reset-password",
           // .bak upload chunks (one request per 8 MB — start/complete/restore are still audited)
           "/database-backup/upload-chunk/" };
 

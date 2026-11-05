@@ -21,6 +21,7 @@ publish.zip
 
 # ── Runtime data (user uploads should NOT be in source control) ──
 user-uploads/
+tracker-uploads/
 Uploads/
 wwwroot/uploads/
 

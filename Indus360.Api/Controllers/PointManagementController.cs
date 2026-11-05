@@ -65,6 +65,12 @@ public sealed class PointManagementController : ControllerBase
         [FromQuery] DateTime? from, [FromQuery] DateTime? to, [FromQuery] int? devId, [FromQuery] int? custId)
         => Ok(await _points.GetAdminStatsAsync(from, to, devId, custId));
 
+    // ---------------- Implementor dashboard ----------------
+    [HttpGet("dashboard/implementor")]
+    public async Task<IActionResult> GetImplementorDashboard(
+        [FromQuery] DateTime? from, [FromQuery] DateTime? to, [FromQuery] int? reportedBy, [FromQuery] int? custId)
+        => Ok(await _points.GetImplementorDashboardAsync(from, to, reportedBy, custId));
+
     /// <summary>Points behind a stat card / filtered grid.</summary>
     [HttpGet("points")]
     public async Task<IActionResult> GetPoints(
@@ -280,6 +286,8 @@ public sealed class PointManagementController : ControllerBase
     {
         if (req.DevId <= 0 || req.PointIds.Count == 0)
             return BadRequest(new { message = "Select at least one point and a developer." });
+        if (req.ExpectedDate is null || req.ExpectedMinutes is null or <= 0)
+            return BadRequest(new { message = "Expected Date and Est. Minutes are required." });
         if (req.CreatedById <= 0)
             return BadRequest(new { message = "Your account is not linked to a Point Management (TMS) user. Ask an admin to add you in Manage Users." });
         var ticketId = await _tickets.CreateAndAssignAsync(req);

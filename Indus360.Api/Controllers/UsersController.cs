@@ -223,6 +223,14 @@ public sealed class UsersController : ControllerBase
     }
 
     /// <summary>Feature-permission keys granted to a user (opt-in). Also used by the app to gate features for the current user.</summary>
+    /// <summary>User ids granted one feature-permission key.</summary>
+    [HttpGet("with-permission/{key}")]
+    public async Task<IActionResult> WithPermission(string key)
+    {
+        try { return Ok(new { success = true, data = await _repo.GetUserIdsWithPermissionAsync(key) }); }
+        catch (Exception ex) { return Ok(new { success = false, message = ex.Message, data = Array.Empty<long>() }); }
+    }
+
     [HttpGet("{id:long}/permissions")]
     public async Task<IActionResult> Permissions(long id)
     {

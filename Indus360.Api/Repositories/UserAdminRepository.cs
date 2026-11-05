@@ -280,6 +280,14 @@ public sealed class UserAdminRepository
             new { userId })).ToList();
     }
 
+    /// <summary>Ids of the users granted a feature-permission key (e.g. "onsite.person" → Onsite Person dropdown).</summary>
+    public async Task<List<long>> GetUserIdsWithPermissionAsync(string key)
+    {
+        await using var c = await _db.OpenAsync();
+        return (await c.QueryAsync<long>(
+            "SELECT DISTINCT UserId FROM app.UserPermissions WHERE PermissionKey=@key", new { key })).ToList();
+    }
+
     /// <summary>Replace a user's granted feature permissions (delete-all + reinsert the granted keys).</summary>
     public async Task<int> SavePermissionsAsync(long userId, IEnumerable<string> keys)
     {
